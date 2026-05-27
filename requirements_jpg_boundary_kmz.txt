@@ -1,0 +1,8 @@
+exifread
+matplotlib
+numpy
+pyproj
+scipy
+shapely
+simplekml
+tkinterdnd2
