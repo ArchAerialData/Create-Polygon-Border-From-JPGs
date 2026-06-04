@@ -40,13 +40,16 @@ class BoundaryKmzApp:
         self.root.title("JPG Boundary to KMZ")
         self.root.minsize(980, 720)
 
+        default_output_path = self._default_output_path()
         self.parent_var = tk.StringVar()
         self.buffer_var = tk.StringVar(value="0")
-        self.output_var = tk.StringVar(value=str(self._default_output_path()))
+        self.output_name_var = tk.StringVar(value=default_output_path.stem)
+        self.output_var = tk.StringVar(value=str(default_output_path))
         self.section_count_var = tk.StringVar(value="1")
         self.overlap_var = tk.StringVar(value="50")
         self.shape_label_var = tk.StringVar(value=self._default_shape_label())
         self.status_var = tk.StringVar(value="Choose a JPG folder or KMZ file to begin.")
+        self._updating_output_fields = False
         self._updating_shape_label = False
         self._shape_label_touched = False
         self._details_text = ""
@@ -57,6 +60,7 @@ class BoundaryKmzApp:
         self._busy = False
 
         self._build_ui()
+        self.output_name_var.trace_add("write", self._on_output_name_changed)
         self.output_var.trace_add("write", self._on_output_changed)
         self.section_count_var.trace_add("write", self._on_section_options_changed)
         self.overlap_var.trace_add("write", self._on_section_options_changed)
@@ -71,7 +75,7 @@ class BoundaryKmzApp:
         self.root.rowconfigure(0, weight=1)
 
         root_frame.columnconfigure(1, weight=1)
-        root_frame.rowconfigure(6, weight=1)
+        root_frame.rowconfigure(7, weight=1)
 
         ttk.Label(root_frame, text="Input folder or KMZ").grid(
             row=0,
@@ -121,22 +125,43 @@ class BoundaryKmzApp:
             pady=4,
         )
 
-        ttk.Label(root_frame, text="Output KMZ").grid(
+        ttk.Label(root_frame, text="Output file name").grid(
             row=3,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
+        output_name_frame = ttk.Frame(root_frame)
+        output_name_frame.grid(row=3, column=1, sticky="ew", pady=4)
+        output_name_frame.columnconfigure(0, weight=1)
+        ttk.Entry(
+            output_name_frame,
+            textvariable=self.output_name_var,
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(output_name_frame, text=".kmz").grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(6, 0),
+        )
+
+        ttk.Label(root_frame, text="Output KMZ").grid(
+            row=4,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
         ttk.Entry(root_frame, textvariable=self.output_var).grid(
-            row=3,
+            row=4,
             column=1,
             sticky="ew",
             pady=4,
         )
         output_buttons = ttk.Frame(root_frame)
         output_buttons.grid(
-            row=3,
+            row=4,
             column=2,
             sticky="ew",
             padx=(8, 0),
@@ -156,7 +181,7 @@ class BoundaryKmzApp:
         ).grid(row=0, column=1, sticky="ew")
 
         sections_frame = ttk.LabelFrame(root_frame, text="Sections")
-        sections_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        sections_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         sections_frame.columnconfigure(5, weight=1)
 
         ttk.Label(sections_frame, text="# of Shapes").grid(
@@ -234,7 +259,7 @@ class BoundaryKmzApp:
         self._register_drop_target()
 
         button_frame = ttk.Frame(root_frame)
-        button_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        button_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         button_frame.columnconfigure(3, weight=1)
 
         self.scan_button = ttk.Button(
@@ -266,7 +291,7 @@ class BoundaryKmzApp:
         )
 
         preview_frame = ttk.LabelFrame(root_frame, text="Preview")
-        preview_frame.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        preview_frame.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
 
@@ -358,13 +383,12 @@ class BoundaryKmzApp:
             initialfile=initial_file,
         )
         if output:
-            self.output_var.set(output)
+            self._set_output_path(Path(output))
 
     def _view_output_folder(self) -> None:
         try:
             folder = self._current_output_folder()
-            folder.mkdir(parents=True, exist_ok=True)
-            self._open_folder(folder)
+            self._open_output_folder(folder)
             self.status_var.set(f"Opened output folder: {folder}")
         except Exception as error:
             messagebox.showerror("Open output folder failed", str(error))
@@ -375,13 +399,17 @@ class BoundaryKmzApp:
             parent_text = self.parent_var.get().strip()
             parent_folder = self._path_from_text(parent_text) if parent_text else None
             output_path = self._default_output_path(parent_folder)
-            self.output_var.set(str(output_path))
+            self._set_output_path(output_path)
             return output_path.parent
 
         output_path = self._resolve_output_path(output_text)
         if output_path.exists() and output_path.is_dir():
             return output_path
         return output_path.parent
+
+    def _open_output_folder(self, folder: Path) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        self._open_folder(folder)
 
     def _open_folder(self, folder: Path) -> None:
         folder = folder.resolve()
@@ -392,9 +420,54 @@ class BoundaryKmzApp:
         else:
             subprocess.Popen(["xdg-open", str(folder)])
 
-    def _on_output_changed(self, *_args: object) -> None:
+    def _set_output_path(self, output_path: Path, *, sync_name: bool = True) -> None:
+        output_path = Path(output_path)
+        self._updating_output_fields = True
+        try:
+            self.output_var.set(str(output_path))
+            if sync_name:
+                self.output_name_var.set(output_path.stem)
+        finally:
+            self._updating_output_fields = False
         self._refresh_shape_label_default()
         self._invalidate_cache()
+
+    def _sync_output_name_from_path(self) -> None:
+        output_text = self.output_var.get().strip()
+        if not output_text:
+            return
+
+        self._updating_output_fields = True
+        try:
+            self.output_name_var.set(self._resolve_output_path(output_text).stem)
+        finally:
+            self._updating_output_fields = False
+
+    def _on_output_changed(self, *_args: object) -> None:
+        if self._updating_output_fields:
+            return
+        self._sync_output_name_from_path()
+        self._refresh_shape_label_default()
+        self._invalidate_cache()
+
+    def _on_output_name_changed(self, *_args: object) -> None:
+        if self._updating_output_fields:
+            return
+
+        output_name = self.output_name_var.get().strip()
+        if not output_name:
+            self._invalidate_cache()
+            return
+
+        output_text = self.output_var.get().strip()
+        if output_text:
+            output_folder = self._resolve_output_path(output_text).parent
+        else:
+            output_folder = DEFAULT_OUTPUT_DIR
+        self._set_output_path(
+            output_folder / self._filename_from_output_name(output_name),
+            sync_name=False,
+        )
 
     def _on_section_options_changed(self, *_args: object) -> None:
         self._update_section_control_state()
@@ -585,7 +658,7 @@ class BoundaryKmzApp:
                 )
                 self._draw_preview(result)
                 self._set_busy(False, "KMZ exported.")
-                messagebox.showinfo("KMZ exported", f"Saved:\n\n{saved_path}")
+                self._show_export_success(saved_path)
             elif kind == "error":
                 error = payload
                 self._set_busy(False, "Ready.")
@@ -593,6 +666,69 @@ class BoundaryKmzApp:
                 messagebox.showerror("Boundary generation failed", str(error))
 
         self.root.after(100, self._drain_queue)
+
+    def _show_export_success(self, saved_path: Path) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("KMZ exported")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.columnconfigure(0, weight=1)
+
+        content = ttk.Frame(dialog, padding=(20, 16, 20, 12))
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+
+        ttk.Label(content, text="Saved:").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            content,
+            text=str(saved_path),
+            justify="left",
+            wraplength=460,
+        ).grid(row=1, column=0, sticky="ew", pady=(8, 16))
+
+        buttons = ttk.Frame(content)
+        buttons.grid(row=2, column=0, sticky="e")
+
+        def view_saved_folder() -> None:
+            try:
+                self._open_output_folder(saved_path.parent)
+                self.status_var.set(f"Opened output folder: {saved_path.parent}")
+            except Exception as error:
+                messagebox.showerror(
+                    "Open output folder failed",
+                    str(error),
+                    parent=dialog,
+                )
+
+        ttk.Button(
+            buttons,
+            text="View Output Folder",
+            command=view_saved_folder,
+        ).grid(row=0, column=0, padx=(0, 8))
+        ok_button = ttk.Button(buttons, text="OK", command=dialog.destroy)
+        ok_button.grid(row=0, column=1)
+
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.bind("<Return>", lambda _event: dialog.destroy())
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self._center_child_window(dialog)
+        dialog.grab_set()
+        ok_button.focus_set()
+
+    def _center_child_window(self, window: tk.Toplevel) -> None:
+        self.root.update_idletasks()
+        window.update_idletasks()
+
+        parent_x = self.root.winfo_rootx()
+        parent_y = self.root.winfo_rooty()
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        window_width = window.winfo_width()
+        window_height = window.winfo_height()
+
+        x = parent_x + max((parent_width - window_width) // 2, 0)
+        y = parent_y + max((parent_height - window_height) // 2, 0)
+        window.geometry(f"+{x}+{y}")
 
     def _read_inputs(
         self,
@@ -640,18 +776,29 @@ class BoundaryKmzApp:
         output_path: Path | None = None
         output_text = self.output_var.get().strip()
         if not output_text:
-            output_text = str(self._default_output_path(input_path))
-            self.output_var.set(output_text)
+            current_output_path = self._default_output_path(input_path)
+            self._set_output_path(current_output_path)
+        else:
+            current_output_path = self._resolve_output_path(output_text)
+
+        output_name = self.output_name_var.get().strip()
+        if output_name:
+            current_output_path = (
+                current_output_path.parent
+                / self._filename_from_output_name(output_name)
+            )
+            if str(current_output_path) != self.output_var.get().strip():
+                self._set_output_path(current_output_path, sync_name=False)
 
         shape_label = ""
         if section_count > 1:
             shape_label = self.shape_label_var.get().strip()
             if not shape_label:
-                shape_label = self._resolve_output_path(output_text).stem
+                shape_label = current_output_path.stem
                 self._refresh_shape_label_default(force=True)
 
         if require_output:
-            output_path = self._resolve_output_path(output_text)
+            output_path = current_output_path
 
         return input_path, buffer_ft, section_count, overlap_ft, shape_label, output_path
 
@@ -786,7 +933,7 @@ class BoundaryKmzApp:
 
     def _set_input_path(self, input_path: Path) -> None:
         self.parent_var.set(str(input_path))
-        self.output_var.set(str(self._default_output_path(input_path)))
+        self._set_output_path(self._default_output_path(input_path))
         self._invalidate_cache()
 
     def _parse_dropped_paths(self, data: str) -> list[Path]:
@@ -862,6 +1009,13 @@ class BoundaryKmzApp:
         invalid = '<>:"/\\|?*'
         safe = "".join("_" if char in invalid else char for char in value).strip()
         return safe or "jpg_camera_boundary"
+
+    @staticmethod
+    def _filename_from_output_name(output_name: str) -> str:
+        stem = BoundaryKmzApp._strip_wrapping_quotes(output_name)
+        if stem.lower().endswith(".kmz"):
+            stem = stem[:-4]
+        return f"{BoundaryKmzApp._safe_filename_stem(stem)}.kmz"
 
     def _default_shape_label(self) -> str:
         output_text = self.output_var.get().strip()

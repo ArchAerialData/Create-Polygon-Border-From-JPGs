@@ -33,6 +33,7 @@ BUFFER_QUAD_SEGS = 8
 BUFFER_MITRE_LIMIT = 3.0
 MAX_SECTION_COUNT = 100
 ACRES_PER_SQUARE_METER = 0.000247105381467
+KML_LINE_WIDTH = 6.0
 
 
 class BoundaryError(RuntimeError):
@@ -687,7 +688,7 @@ def _style_polygon(polygon, color_index: int) -> None:
     ]
     red, green, blue = palette[color_index % len(palette)]
     polygon.style.linestyle.color = simplekml.Color.rgb(red, green, blue)
-    polygon.style.linestyle.width = 3
+    polygon.style.linestyle.width = KML_LINE_WIDTH
     polygon.style.polystyle.color = simplekml.Color.rgb(red, green, blue, 45)
     polygon.style.polystyle.fill = 1
     polygon.style.polystyle.outline = 1

@@ -36,12 +36,14 @@ In the app:
    existing single-polygon KMZ.
    You can also drag and drop that input folder or KMZ onto the drop field.
 2. Enter a buffer distance in feet. Use `0` for no added buffer.
-3. Use the default output path or choose a different `.kmz` path.
+3. Use the default output file name, enter a custom file name, or choose a
+   different `.kmz` path.
 4. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
 5. For multiple shapes, set overlap feet and shape label.
 6. Click `Scan / Preview`.
 7. Click `Export KMZ`.
-8. Click `View Output Folder` to open the folder containing the KMZ.
+8. Click `View Output Folder` in the completion popup or main window to open
+   the folder containing the KMZ.
 9. Click `View Details` when you want the full scan/export summary.
 
 ## Behavior
@@ -57,7 +59,10 @@ In the app:
   a folder or `.kmz` file onto the app.
 - The default KMZ location is the app-local `outputs` folder, so exporting does
   not require manually choosing an output path.
-- `View Output Folder` opens the directory for the current Output KMZ path.
+- Editing `Output file name` keeps the current output folder and updates the
+  final `.kmz` path.
+- `View Output Folder` opens the directory for the current or just-exported
+  Output KMZ path.
 - Relative output paths typed manually are resolved from the app folder, not the
   shell's current working directory.
 - The projected CRS is auto-detected from the coordinate centroid using the
