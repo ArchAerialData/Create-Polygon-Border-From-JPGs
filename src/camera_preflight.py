@@ -232,24 +232,6 @@ def classify_camera_pattern(
     return PATTERN_SCATTER_UNKNOWN, 0.30, warnings
 
 
-def metrics_to_dict(metrics: CameraPreflightMetrics) -> dict[str, float | int]:
-    return {
-        "point_count": metrics.point_count,
-        "median_nearest_spacing_m": metrics.median_nearest_spacing_m,
-        "median_ordered_spacing_m": metrics.median_ordered_spacing_m,
-        "max_ordered_gap_m": metrics.max_ordered_gap_m,
-        "gap_threshold_m": metrics.gap_threshold_m,
-        "dominant_heading_deg": metrics.dominant_heading_deg,
-        "dominant_heading_ratio": metrics.dominant_heading_ratio,
-        "heading_change_median_deg": metrics.heading_change_median_deg,
-        "turn_ratio": metrics.turn_ratio,
-        "row_count": metrics.row_count,
-        "row_spacing_m": metrics.row_spacing_m,
-        "row_spacing_cv": metrics.row_spacing_cv,
-        "closure_ratio": metrics.closure_ratio,
-    }
-
-
 def _path_sort_key(path: Path) -> str:
     return str(Path(path)).lower()
 

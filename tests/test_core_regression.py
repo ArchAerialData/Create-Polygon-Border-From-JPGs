@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from shapely.geometry import Polygon
+
 from tests.geometry_test_utils import synthetic_point
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +20,7 @@ from jpg_boundary_kmz_core import (  # noqa: E402
     BoundaryError,
     generate_boundary,
     generate_boundary_from_kmz,
+    _strict_single_polygon,
 )
 from outline_strategies import OUTLINE_MODE_CONCAVE  # noqa: E402
 
@@ -63,6 +66,14 @@ class CoreRegressionTests(TestCase):
             ):
                 with self.assertRaises(BoundaryError):
                     generate_boundary(folder, 0.0, outline_mode="bad-mode")
+
+    def test_holed_section_geometry_is_rejected(self) -> None:
+        holed = Polygon(
+            [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)],
+            holes=[[(4, 4), (6, 4), (6, 6), (4, 6), (4, 4)]],
+        )
+
+        self.assertIsNone(_strict_single_polygon(holed))
 
 
 def _generate_with_synthetic_jpgs(folder: Path, section_count: int):

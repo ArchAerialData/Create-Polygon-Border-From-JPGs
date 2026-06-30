@@ -711,12 +711,14 @@ def _strict_single_polygon(geometry, min_area: float = 1e-6) -> Polygon | None:
     if not geometry.is_valid:
         geometry = make_valid(geometry)
     if isinstance(geometry, Polygon) and geometry.area > min_area:
-        return geometry
+        return geometry if not geometry.interiors else None
     if isinstance(geometry, GeometryCollection):
         polygons = [
             part
             for part in geometry.geoms
-            if isinstance(part, Polygon) and part.area > min_area
+            if isinstance(part, Polygon)
+            and part.area > min_area
+            and not part.interiors
         ]
         if len(polygons) == 1:
             return polygons[0]

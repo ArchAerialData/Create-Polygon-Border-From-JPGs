@@ -6,7 +6,7 @@ from typing import Sequence
 
 import numpy as np
 from shapely import concave_hull
-from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, Polygon
+from shapely.geometry import LineString, MultiPoint, MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 from camera_preflight import (
