@@ -1,8 +1,10 @@
-# Temporary Open Decisions: Camera Boundary V2
+# Resolved Temporary Decisions: Camera Boundary V2
 
-Status: temporary decision worksheet.
+Status: resolved temporary decision worksheet.
 
-Use this file to answer the remaining product and implementation decisions before Phase 3 or Phase 4 of the Camera Boundary V2 plan. The source decision list comes from `docs/camera-boundary-v2-implementation-plan.md`, section `15.12 User-Required Open Decisions`.
+Resolution status: all eight answers have been integrated into `docs/camera-boundary-v2-implementation-plan.md`. No new follow-up decision file is required as of the latest audit pass.
+
+This file was used to answer the product and implementation decisions before Phase 3 or Phase 4 of the Camera Boundary V2 plan. The resolved decisions are now recorded in `docs/camera-boundary-v2-implementation-plan.md`, section `15.12 Resolved User Decisions`.
 
 Related source files and planning references:
 
@@ -12,19 +14,19 @@ Related source files and planning references:
 - `src/jpg_boundary_kmz_gui.py`
 - `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator\src\buffer_zone_generator\geometry.py`
 
-## Quick Answer Format
+## Answer Record
 
-You can answer by filling this out:
+The answer block below is retained as the source record:
 
 ```text
-D1:
-D2:
-D3:
-D4:
-D5:
-D6:
-D7:
-D8:
+D1: Auto
+D2: For now, this should stick with creating polygons using JPGs as primary input. If it helps to include a KMZ of a clients pipeline system or a clients polygon site boundary as a secondary input for refernce we can do that as well, as long as the shapes are focused on the areas where there are actual JPGs, and not the entire pipeline system.
+D3: Keep internal, but build these out in backend to where they can easily be surfaced in the GUI in the future if we desired to do so.
+D4: We can go with your recommendation
+D5: Yes, I have added a Lawn Mower pattern sample dataset of JPGs, and a ROW Mapping data set of JPGs into a jpgs folder in this directory - C:\Users\rbake\Desktop\VS Code Shortcuts\Create-Polygon-Border-From-JPGs\test_data - Addtionally, I have created an example folder at the same directory root that shows the human-made shapes created for those sites, which can provide guidance on the rough ideals of outcomes from this program. These KMZs were created by humans, using the JPG outlines as rough guidlines for the overall shapes of the polygon(s). The ROW Mapping example KMZ is essentially a single KMZ outline that has been split into 10 sub-polygons with slight overlaps, since they are being used to crop massive orthomosaics within metashape.
+D6: We can go with your recommendation on this one.
+D7: No, I don't think KMZ size is going to be an issue or factor at all.
+D8: We can use your recommendation on this one as well.
 Notes:
 ```
 
@@ -361,4 +363,3 @@ D6: Pin shapely>=2.0 unless older environments must be supported.
 D7: Use a soft vertex-count warning, no hard ceiling unless required.
 D8: Show non-blocking fallback warning in status/details.
 ```
-

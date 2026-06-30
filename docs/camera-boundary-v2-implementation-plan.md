@@ -1,6 +1,6 @@
-# Camera Boundary V2 Implementation Plan
+# Camera Boundary V2 Authoritative Implementation Plan
 
-Planning status: implementation blueprint only. Do not edit source files until this plan is approved or revised.
+Status: authoritative phased implementation guide. This document is the source of truth for implementing Camera Boundary V2 unless it is explicitly revised before or during implementation.
 
 Repository root:
 
@@ -8,20 +8,98 @@ Repository root:
 C:\Users\rbake\Desktop\VS Code Shortcuts\Create-Polygon-Border-From-JPGs
 ```
 
-Current branch observed during planning:
+Current repository status notes observed during planning and final review:
 
-```text
-Testing-New-Methods...origin/Testing-New-Methods
-?? agent_prompt_templates/
+- Branch: `Testing-New-Methods...origin/Testing-New-Methods`.
+- `agent_prompt_templates/` existed before this plan file was created and is not part of the implementation allow-list unless explicitly approved later.
+- `test_data/` exists locally as read-only calibration data and must stay ignored by `.gitignore` so massive sample datasets are not tracked or committed.
+
+## 0. Implementation Authority
+
+This section controls implementation. If any historical planning or audit wording later in this document is less strict, this section wins.
+
+### 0.1 Fixed Product Decisions
+
+- JPG folders are the primary input for Camera Boundary V2.
+- `Auto` is the default outline mode for JPG folders.
+- The current concave-hull workflow remains the conservative fallback.
+- Existing KMZ-as-primary input remains a legacy compatibility workflow and must not be broken.
+- Human-made KMZs under `test_data\output-shape-examples` are validation/calibration references only. They must not cause generated output to expand into pipeline/system areas without JPG coverage.
+- Advanced classifier thresholds stay internal for the first implementation. The backend must keep threshold constants centralized so a future GUI advanced section can expose them without rewriting strategy logic.
+- Acceptance uses reference KMZ comparison when available, plus agent-performed visual/manual review and guardrail metrics. When no reference geometry is available, acceptance uses agent-performed visual/manual review, area plausibility, control-point coverage, and boundary-deviation diagnostics. Human review is required only when the orchestrator's human-blocking conditions are triggered.
+- `requirements_jpg_boundary_kmz.txt` must pin `shapely>=2.0`.
+- No hard KMZ file-size or vertex-count ceiling is required.
+- If `Auto` falls back to concave hull, the GUI/details output must show a non-blocking fallback reason.
+
+### 0.2 Implementation Constraints
+
+- Use the existing direct `src/` module pattern; do not introduce packaging changes.
+- Use Python `unittest`; do not introduce `pytest` or new test dependencies.
+- Do not add runtime dependencies other than the `shapely>=2.0` pin.
+- Treat `test_data/` as read-only input data.
+- Keep the `.gitignore` rule for `test_data/`; `git status --short` must not list sample data files or folders.
+- Do not write generated outputs into `test_data/`, `outputs/`, or source folders during tests. Tests must use temporary directories.
+- Keep generated KMZs from manual validation disposable and uncommitted.
+- Do not modify `run_jpg_boundary_gui.py`, `src/run_jpg_boundary_gui.py`, or `run_jpg_boundary_gui.bat`.
+- Do not modify `agent_prompt_templates/`.
+- Do not modify files in `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator`.
+
+### 0.3 Required Module Boundaries
+
+- `src/geometry_hardening.py` owns projected buffer helpers, `buffer(0)` cleanup, segment densification, and geometry validity helpers.
+- `src/camera_preflight.py` owns camera order, spacing, heading, row, gap, and pattern classification metrics.
+- `src/outline_strategies.py` owns outline candidate construction, strategy scoring, and hard candidate rejection gates.
+- `src/jpg_boundary_kmz_core.py` owns orchestration, metadata, KMZ save behavior, legacy KMZ input compatibility, and public generation functions.
+- `src/jpg_boundary_kmz_gui.py` owns UI controls, cached settings, preview, worker calls, and user-visible details/status text.
+- Test helper code belongs in `tests/geometry_test_utils.py`; production modules must not import test helpers.
+
+### 0.4 Hard Phase Gate Rules
+
+- Phases must be implemented in order.
+- Do not begin a downstream phase until every command and pass/fail criterion in the current phase passes.
+- Passing phase gates are agent-verifiable and do not require human approval unless a human-blocking condition in `docs/camera-boundary-v2-implementation-orchestrator.md` is triggered.
+- If a phase fails, patch within that phase's allow-list or revise this document before touching additional files.
+- After each phase, run `git status --short` and `git diff --name-only` and confirm that only files allowed for that phase changed or remain untracked.
+- After each phase, confirm `test_data/`, `outputs/`, `__pycache__/`, and non-allow-listed files were not modified.
+- After each phase, confirm `git status --short` does not show `test_data/` or files below it.
+- Any implementation that silently changes legacy KMZ-as-primary behavior fails the gate.
+- Any implementation that lets `Auto` select invalid geometry, unsupported disconnected geometry, or a candidate outside JPG-covered areas fails the gate.
+- Human review blocks progress only for the human-blocking conditions listed in `docs/camera-boundary-v2-implementation-orchestrator.md`.
+
+### 0.5 Final Required Validation Commands
+
+Run these before considering implementation complete:
+
+```powershell
+git status --short --branch
+python -m unittest discover -s tests
+python -m compileall src
+python .\run_jpg_boundary_gui.py
+git check-ignore -v test_data/
+git diff --name-only
 ```
 
-The untracked `agent_prompt_templates/` directory existed before this plan file was created and is not part of the implementation allow-list unless explicitly approved later.
+Manual validation is also required against:
+
+- `test_data\jpgs\Lawn Mower JPGs`
+- `test_data\output-shape-examples\Lawn Mower JPGs\Lawn Mower JPGs.kmz`
+- `test_data\jpgs\Day 1 - 06-24`
+- `test_data\output-shape-examples\Day 1 - 06-24\Day 1 - 06-24.kmz`
+
+### 0.6 Testing And Evidence Authority
+
+- Automated tests use `unittest` and live under `tests/`.
+- Every test named in section 9 is required unless this document is revised before implementation.
+- Phase 5 must create `docs/camera-boundary-v2-validation-notes.md`.
+- `docs/camera-boundary-v2-validation-notes.md` must record the commands run, generated disposable output locations, real sample inputs used, reference KMZs used, selected strategies, fallback reasons, and pass/fail notes.
+- Manual validation evidence is incomplete if `docs/camera-boundary-v2-validation-notes.md` does not mention both real datasets.
+- A phase is failed if any required automated command fails, if changed files exceed that phase's allow-list, or if validation evidence required for that phase is missing.
 
 ## 1. Executive Summary
 
-The new version should replace the single default JPG outline method with an auto-selected outline engine. The current repo builds a JPG boundary from GPS points using a Shapely concave hull, then applies simplification, optional buffering, optional section splitting, preview, and KMZ export. That path should remain as the conservative fallback.
+The new version must replace the single default JPG outline method with an auto-selected outline engine. The current repo builds a JPG boundary from GPS points using a Shapely concave hull, then applies simplification, user-selected buffering, user-selected section splitting, preview, and KMZ export. That path remains the conservative fallback.
 
-The new engine should add:
+The new engine must add:
 
 - A camera-position preflight classifier.
 - Route-aware outline generation for perimeter/corridor-style capture paths.
@@ -31,6 +109,17 @@ The new engine should add:
 - Explicit GUI controls and details output so users can see the selected strategy, confidence, and fallback reason.
 
 The primary risk is incorrect automatic classification. The implementation must be conservative: if confidence is low, the current concave hull path remains the output.
+
+User decisions resolved on 2026-06-30:
+
+- `Auto` is the default outline mode for JPG folders.
+- V2 remains JPG-primary. KMZs are allowed only as reference/calibration geometry, and generated shapes must stay focused on areas with actual JPG coverage, not an entire client pipeline/system boundary.
+- Existing KMZ-as-primary workflow remains a legacy compatibility path; it is not the focus of V2 camera-boundary inference.
+- Advanced classifier thresholds stay internal for the first version, but backend structures must keep them easy to expose in the GUI later.
+- Acceptance uses reference KMZ comparison when available; otherwise use agent-performed visual/manual review plus guardrail metrics. Human review is not required unless the orchestrator's human-blocking conditions are triggered.
+- `shapely>=2.0` must be pinned instead of implementing a manual segmentization fallback.
+- No practical KMZ file-size or vertex-count ceiling is required.
+- Uncertain `Auto` fallback must be shown as a non-blocking status/details warning.
 
 ## 2. Current Repository Findings
 
@@ -46,8 +135,12 @@ The primary risk is incorrect automatic classification. The implementation must 
 | GUI calls `generate_boundary_from_input` directly for scan/export. | `src/jpg_boundary_kmz_gui.py`, `_scan_worker`, `_export_worker` | Verified from code | GUI mode options must flow through this boundary. |
 | The root launcher inserts `src` on `sys.path` and imports `jpg_boundary_kmz_gui.main`. | `run_jpg_boundary_gui.py` | Verified from code | New modules in `src/` can be imported like existing modules. |
 | No `tests/` directory currently exists in this repo. | `rg --files` from repo root | Verified from repository listing | New testing structure must be created. |
-| Existing dependency list already includes `numpy`, `scipy`, `shapely`, and `pyproj`. | `requirements_jpg_boundary_kmz.txt` | Verified from code | Planned algorithms should avoid new dependencies initially. |
+| Existing dependency list already includes `numpy`, `scipy`, `shapely`, and `pyproj`. | `requirements_jpg_boundary_kmz.txt` | Verified from code | Planned algorithms must avoid new dependencies except the `shapely>=2.0` pin. |
 | Shapely 2.0.7 is installed locally and supports `segmentize`. | `python -c "import shapely; ..."` | Verified in local environment | Segment densification can be implemented without adding dependencies on this machine. |
+| Real calibration JPG samples are available under `test_data\jpgs`. | `test_data\jpgs\Lawn Mower JPGs`, `test_data\jpgs\Day 1 - 06-24` | Verified from repository filesystem | Use for calibration/manual validation; keep read-only during implementation. |
+| Human-made output-shape examples are available under `test_data\output-shape-examples`. | `test_data\output-shape-examples\Lawn Mower JPGs\Lawn Mower JPGs.kmz`, `test_data\output-shape-examples\Day 1 - 06-24\Day 1 - 06-24.kmz` | Verified from repository filesystem | Use as reference geometry for validation/calibration, not as primary generation input. |
+| The lawnmower sample has 533 JPGs. | `test_data\jpgs\Lawn Mower JPGs` count command | Verified from filesystem count | Required real sample for lawnmower strategy calibration. |
+| The ROW mapping sample has 1,567 JPGs across seven flight folders. | `test_data\jpgs\Day 1 - 06-24` count command and nested folder listing | Verified from filesystem count | Required real sample for route/mixed-section calibration and sectioning behavior. |
 | `Buffer-Zone-Generator` buffers projected line geometry using `quad_segs=64`, then `buffer(0)`, then `segmentize(10m)`. | `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator\src\buffer_zone_generator\geometry.py`, `build_buffer_geometry` | Verified from code | These are the strongest directly transferable improvements. |
 | `Buffer-Zone-Generator` validates exported shape deviation with projected Hausdorff distance. | `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator\src\buffer_zone_generator\verification.py`, `verify_generated_output` | Verified from code | Use the same idea for regression tests and candidate scoring diagnostics. |
 
@@ -150,9 +243,17 @@ Reason: protect existing JPG/KMZ flows.
 
 Reason: shared synthetic point-cloud and polygon builders for deterministic test cases. This avoids duplicating fragile test setup across classifier, strategy, and regression tests.
 
+`docs/TEMP-camera-boundary-v2-open-decisions.md`
+
+Reason: temporary decision worksheet. The answers in this file have been integrated into this plan; it is not an implementation artifact.
+
 `docs/camera-boundary-v2-implementation-plan.md`
 
 Reason: this planning artifact. Future revisions are allowed only when planning changes are intentional.
+
+`docs/camera-boundary-v2-validation-notes.md`
+
+Reason: Phase 5 validation evidence artifact for commands, real sample calibration, reference KMZ comparison notes, selected strategies, fallback reasons, and pass/fail results.
 
 ### Proposed Internal API Contracts
 
@@ -165,7 +266,7 @@ These contracts are implementation targets. They are not current code.
 - `route_aware`
 - `lawnmower_envelope`
 
-The GUI should display human-friendly labels, but the core should use stable string values. If an unknown value reaches the core, the core must raise `BoundaryError` with a clear message instead of silently falling back.
+The GUI displays human-friendly labels, and the core uses stable string values. If an unknown value reaches the core, the core must raise `BoundaryError` with a clear message instead of silently falling back.
 
 `CameraPreflightResult`
 
@@ -186,7 +287,16 @@ The GUI should display human-friendly labels, but the core should use stable str
 - `rejection_reasons`: list of specific failed gates
 - `diagnostics`: serializable values for details output
 
-`BoundaryMetadata` additions should remain backward-compatible with existing formatting code. New fields should have simple scalar or string values, not nested Shapely objects or NumPy arrays.
+`BoundaryMetadata` additions must remain backward-compatible with existing formatting code. New fields must have simple scalar or string values, not nested Shapely objects or NumPy arrays.
+
+`ReferenceBoundaryContext`
+
+- Calibration input only; not required for normal JPG folder use.
+- Source is a human-made KMZ reference polygon or multipolygon.
+- Used for validation, scoring diagnostics, and calibration reports when available.
+- Must never cause output to expand to a full client pipeline/system boundary that has no matching JPG coverage.
+- If reference geometry is larger than the JPG-covered area, scoring must compare only relevant overlap/nearby portions or report that the reference is too broad for direct scoring.
+- The first implementation uses reference KMZs for test/calibration workflows. A normal GUI reference-KMZ picker is out of scope for the first implementation.
 
 ## 4. Risk Matrix
 
@@ -196,24 +306,27 @@ The GUI should display human-friendly labels, but the core should use stable str
 | Lawnmower outer-envelope misses concave notches or complex corners. | High | Medium | Preserve corner candidates and compare against concave hull coverage/area. | Candidate scoring diagnostics. |
 | Mixed-section splitting creates disconnected artifacts. | High | Medium | Validate each section and union result; reject disconnected candidates unless intended. | Geometry validity tests. |
 | Capture order is wrong due to missing EXIF timestamps. | Medium | Medium | Track order source; fallback to filename order; avoid route-aware strategy if order quality is poor. | Preflight details output. |
-| Densified KMZ files become too large. | Medium | Low | Use configurable max segment length; report vertex count; default 10m or coarser if needed. | Vertex-count tests and manual export review. |
+| Densified KMZ files become too large. | Low | Low | No hard ceiling is required; report vertex count for diagnostics only. | Vertex-count tests and manual export review. |
 | Existing KMZ polygon input regresses. | High | Low | Keep KMZ path separate; add regression test. | `test_kmz_input_still_works`. |
 | GUI cache returns stale results after mode change. | Medium | Medium | Include outline mode and strategy parameters in cache key. | GUI smoke test. |
 | New modules introduce circular imports. | Medium | Low | Keep dependencies directional: core imports strategy modules; strategy modules do not import GUI. | `compileall`. |
-| Dependency/version mismatch on another machine without Shapely `segmentize`. | Medium | Medium | Detect capability or pin/version-document Shapely 2.x if needed. | startup/test failure with clear message. |
+| Dependency/version mismatch on another machine without Shapely `segmentize`. | Medium | Medium | Pin `shapely>=2.0` and keep a startup/test failure message clear if the installed version is too old. | dependency install check and tests. |
+| Reference KMZ is much larger than the JPG-covered work area. | Medium | Medium | Treat reference KMZ as validation/calibration context only; compare only relevant nearby/overlap geometry and never generate a full pipeline/system shape from reference alone. | reference scoring diagnostics and manual calibration review. |
 
-## 5. Assumptions And Unknowns
+## 5. Assumptions, Decisions, And Implementation Risks
 
 | Item | Classification | Notes |
 |---|---|---|
 | Current concave hull behavior is acceptable as fallback. | Verified from code and existing README behavior | Existing docs say the outline is intentionally generalized. |
 | New modules can live directly under `src/`. | Verified from launcher/import pattern | Existing files import sibling modules from `src`. |
-| Synthetic tests are enough for implementation gates. | Likely but not fully proven | Real sample validation is still needed before production confidence. |
-| JPG filenames are often capture-order sorted. | Unverified risk | Must not be treated as guaranteed. |
-| EXIF `DateTimeOriginal` is available in many target images. | Unverified risk | Current code does not read it. |
-| Representative real JPG folders are available outside the repo. | Blocker requiring clarification for final tuning | Needed for threshold calibration. |
-| The output should remain one parent polygon before optional section splitting. | Likely but not fully proven | Existing splitting assumes one connected parent polygon. |
-| Adding an `Outline mode` GUI option is acceptable. | Likely but not fully proven | User requested a new version using all techniques; exact UI label not confirmed. |
+| Synthetic tests are enough for early implementation gates. | Verified decision | Synthetic tests are sufficient through Phase 2; real sample validation is required before final Auto threshold acceptance. |
+| JPG filename order can match capture order but is not guaranteed. | Implementation risk | Must not be treated as authoritative when EXIF capture time is available. |
+| EXIF `DateTimeOriginal` availability varies by input. | Implementation risk | Missing or invalid timestamps must not reject otherwise valid GPS points. |
+| Representative real JPG folders are available under `test_data`. | Verified from filesystem | Use `test_data\jpgs\Lawn Mower JPGs` and `test_data\jpgs\Day 1 - 06-24` for calibration/manual validation. |
+| The output remains one parent polygon before section splitting. | Resolved implementation constraint | Existing splitting assumes one connected parent polygon; mixed strategy output must union to a valid parent polygon or fail clearly. |
+| Adding an `Outline mode` GUI option is acceptable. | Resolved decision | Default is `Auto`; advanced thresholds remain internal. |
+| Reference KMZ support is required as a primary input. | Resolved decision: no | JPGs remain primary; KMZ references are allowed for validation/calibration only. |
+| KMZ output size needs a hard limit. | Resolved decision: no | No hard vertex-count or file-size ceiling is required. |
 
 ## 6. Edge Cases And Failure Modes
 
@@ -231,6 +344,8 @@ The GUI should display human-friendly labels, but the core should use stable str
 - Multiple disjoint job areas in one folder.
 - Very large folders with thousands of images.
 - JPG paths with spaces or non-ASCII characters.
+- Reference KMZ is much broader than JPG coverage.
+- Reference KMZ contains multiple sub-polygons, as in the ROW mapping example.
 
 ### Geometry Edge Cases
 
@@ -251,16 +366,20 @@ The GUI should display human-friendly labels, but the core should use stable str
 - Scan with `Auto`, then export after changing mode.
 - Scan/export cache invalidation after changing section count or overlap.
 - KMZ input selected while outline mode controls are visible.
+- Reference KMZ selected for calibration while JPG folder remains the primary input.
 - Existing saved output path overwrite confirmation.
 - Drag/drop path handling remains unchanged.
 
 ## 7. Strict File Allow-List
 
-No files outside this table may be edited, created, deleted, moved, formatted, or regenerated unless this plan is revised first.
+No files outside this table are allowed to be edited, created, deleted, moved, formatted, or regenerated unless this plan is revised first.
 
 | Path | Change Type | Reason | Related Tests | Risk | Rollback Notes |
 |---|---|---|---|---|---|
 | `docs/camera-boundary-v2-implementation-plan.md` | Create/modify | Planning artifact | Documentation review | Low | Revert file only. |
+| `docs/camera-boundary-v2-implementation-orchestrator.md` | Create/modify | Execution runbook for phased implementation | Documentation review | Low | Delete or revise runbook; authoritative plan still wins. |
+| `docs/TEMP-camera-boundary-v2-open-decisions.md` | Create/modify | Historical decision worksheet and resolved user answers | Documentation review | Low | Archive or delete after decisions are represented in this plan. |
+| `.gitignore` | Create/modify | Keep massive local sample data out of git | `git check-ignore -v test_data/`; `git status --short` | Low | Re-add the `test_data/` ignore rule. |
 | `src/geometry_hardening.py` | Create | Shared projected cleanup/densify helpers | `tests/test_geometry_hardening.py` | Medium | Remove imports and file. |
 | `src/camera_preflight.py` | Create | Camera pattern analysis and classification | `tests/test_camera_preflight.py` | High | Disable Auto and remove imports. |
 | `src/outline_strategies.py` | Create | Candidate outline generation and scoring | `tests/test_outline_strategies.py` | High | Force concave strategy and remove imports. |
@@ -271,8 +390,9 @@ No files outside this table may be edited, created, deleted, moved, formatted, o
 | `tests/test_camera_preflight.py` | Create | Validate classifier behavior | `python -m unittest ...` | Medium | Delete test file. |
 | `tests/test_outline_strategies.py` | Create | Validate outline algorithms | `python -m unittest ...` | High | Delete test file. |
 | `tests/test_core_regression.py` | Create | Protect existing workflows | `python -m unittest ...` | Medium | Delete test file. |
-| `tests/geometry_test_utils.py` | Create | Shared synthetic fixtures and assertions | Used by all test files | Low | Delete test helper and inline fixtures if needed. |
-| `requirements_jpg_boundary_kmz.txt` | Conditional modify | Only if no runtime fallback for Shapely versions without `segmentize` is implemented | Full test suite and install check | Medium | Revert requirement change and use runtime fallback instead. |
+| `tests/geometry_test_utils.py` | Create | Shared synthetic fixtures and assertions | Used by all test files | Low | Delete test helper and inline fixtures during rollback. |
+| `requirements_jpg_boundary_kmz.txt` | Modify | Pin `shapely>=2.0` so `segmentize` support is explicit | Full test suite and install check | Medium | Revert pin only if manual densification fallback is added and tested. |
+| `docs/camera-boundary-v2-validation-notes.md` | Create | Record Phase 5 real-sample/manual validation evidence | Phase 5 validation checklist | Low | Delete if implementation is rolled back before validation. |
 
 Explicitly excluded unless the plan is revised:
 
@@ -283,6 +403,7 @@ Explicitly excluded unless the plan is revised:
 - `src/run_jpg_boundary_gui.py`
 - `run_jpg_boundary_gui.bat`
 - `agent_prompt_templates/`
+- `test_data/` contents, except read-only use during calibration/manual validation. Only the top-level `.gitignore` rule may reference this folder.
 - files in `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator`
 
 ## 8. Implementation Phases With Gates
@@ -293,11 +414,12 @@ Goal: establish current state without modifying source code.
 
 Allowed files touched:
 
-- None.
+- `.gitignore` only if the required `test_data/` ignore rule is missing; otherwise none.
 
 Tasks:
 
 - Record `git status --short --branch`.
+- Confirm `test_data/` is ignored by `.gitignore`.
 - Confirm Shapely version and `segmentize` availability.
 - Run baseline compile check.
 - Document untracked files.
@@ -306,6 +428,7 @@ Commands:
 
 ```powershell
 git status --short --branch
+git check-ignore -v test_data/
 python -c "import shapely; from shapely.geometry import Polygon; print(shapely.__version__); print(hasattr(Polygon([(0,0),(1,0),(1,1),(0,0)]), 'segmentize'))"
 python -m compileall src
 ```
@@ -314,12 +437,15 @@ Expected output:
 
 - Branch is known.
 - Existing untracked files are documented.
+- `test_data/` is ignored and does not appear as untracked sample data in normal status output.
 - `compileall` succeeds.
 
 Failure conditions:
 
 - Source does not compile.
-- Shapely lacks `segmentize` and no fallback decision is made.
+- `test_data/` appears as untracked sample data in `git status --short`.
+- `git check-ignore -v test_data/` fails.
+- Shapely lacks `segmentize` after dependency verification.
 
 Pass/fail criteria:
 
@@ -337,15 +463,17 @@ Allowed files touched:
 
 - `src/geometry_hardening.py`
 - `src/jpg_boundary_kmz_core.py`
+- `requirements_jpg_boundary_kmz.txt`
 - `tests/test_geometry_hardening.py`
 
 Tasks:
 
-- Add constants such as `EXPORT_MAX_SEGMENT_M = 10.0` and `BUFFER_QUAD_SEGS = 64` or equivalent helper defaults.
+- Add `EXPORT_MAX_SEGMENT_M = 10.0` in `src/geometry_hardening.py`.
+- Change buffer helper defaults to use `quad_segs=64`.
 - Add helper to clean constructive geometry with `buffer(0)` when needed.
 - Add helper to segmentize projected polygons before WGS84 transformation/export.
-- Add a runtime capability check or dependency version decision for Shapely `segmentize`.
-- Replace repeated buffer call parameters in core with helper calls where safe.
+- Pin `shapely>=2.0` in `requirements_jpg_boundary_kmz.txt` and keep a clear runtime/test failure if an older Shapely is installed.
+- Replace every core buffer call that affects final boundary, containment padding, KMZ polygon buffering, and section overlap buffering with the shared helper.
 - Preserve existing zero-buffer behavior.
 
 Required tests:
@@ -359,6 +487,8 @@ Commands:
 ```powershell
 python -m unittest tests.test_geometry_hardening
 python -m compileall src
+git status --short
+git diff --name-only
 ```
 
 Expected outputs:
@@ -371,7 +501,7 @@ Failure conditions:
 
 - Densification changes geometry area beyond a small tolerance.
 - KMZ input path breaks.
-- Implementation relies on `segmentize` without either a version guard or a documented/pinned dependency requirement.
+- Implementation relies on `segmentize` without the `shapely>=2.0` dependency pin.
 
 Pass/fail criteria:
 
@@ -415,7 +545,9 @@ Tasks:
   - `mixed`
   - `scatter_unknown`
 - Include confidence score and rejection/fallback reasons.
-- Extend GPS reading only if needed to capture EXIF date/time. If EXIF timestamp support is implemented, avoid breaking existing GPS-only behavior.
+- Extend `GpsPoint` with `capture_time: datetime | None`.
+- Update `_read_gps_point` to read `EXIF DateTimeOriginal` first, then `Image DateTime`; invalid or missing timestamps must produce `capture_time=None` without rejecting otherwise valid GPS points.
+- Camera ordering priority is fixed: EXIF capture time, then filename/path sort, then original input order. The selected order source must be recorded in `CameraPreflightResult.order_source`.
 
 Required tests:
 
@@ -430,6 +562,8 @@ Commands:
 ```powershell
 python -m unittest tests.test_camera_preflight
 python -m compileall src
+git status --short
+git diff --name-only
 ```
 
 Expected outputs:
@@ -514,6 +648,8 @@ Commands:
 ```powershell
 python -m unittest tests.test_outline_strategies tests.test_core_regression
 python -m compileall src
+git status --short
+git diff --name-only
 ```
 
 Expected outputs:
@@ -558,6 +694,7 @@ Tasks:
   - `Lawnmower outer envelope`
 - Pass selected mode into `generate_boundary_from_input`.
 - Include mode in `_settings_key`.
+- Keep advanced classifier thresholds internal. Backend/config structures must be organized so selected thresholds can be surfaced in a future GUI advanced section without reworking the strategy engine.
 - Show in details:
   - selected strategy
   - preflight classification
@@ -565,7 +702,9 @@ Tasks:
   - order source
   - fallback reason
   - candidate summary
-- Keep KMZ input behavior clear; either disable mode controls for KMZ input or report that KMZ uses source polygon mode.
+- Show non-blocking status/details text when `Auto` falls back to concave hull.
+- Keep legacy KMZ-as-primary behavior clear: disable outline mode controls for KMZ primary input and report that KMZ input uses source polygon mode.
+- Do not add a normal GUI reference-KMZ picker in the first implementation unless the core and tests already support reference scoring cleanly. Reference KMZs are calibration/validation context first.
 
 Required tests:
 
@@ -578,6 +717,8 @@ Commands:
 python -m unittest discover -s tests
 python -m compileall src
 python .\run_jpg_boundary_gui.py
+git status --short
+git diff --name-only
 ```
 
 Expected outputs:
@@ -586,6 +727,8 @@ Expected outputs:
 - Scan/preview works with default `Auto`.
 - Changing mode invalidates cache.
 - Export creates KMZ.
+- Auto fallback is visible in non-blocking status/details text.
+- KMZ primary input disables outline mode controls.
 
 Failure conditions:
 
@@ -612,22 +755,29 @@ Allowed files touched:
 - `tests/test_camera_preflight.py`
 - `tests/test_outline_strategies.py`
 - `tests/test_core_regression.py`
-- implementation files already touched in prior phases, if fixes are required
+- `docs/camera-boundary-v2-validation-notes.md`
+- implementation files already touched in prior phases, only to fix failing Phase 5 tests or validation findings
 
 Tasks:
 
 - Add or refine synthetic fixtures.
-- Add real-sample notes if representative folders are provided.
+- Run real-sample calibration/manual validation against:
+  - `test_data\jpgs\Lawn Mower JPGs` with `test_data\output-shape-examples\Lawn Mower JPGs\Lawn Mower JPGs.kmz`
+  - `test_data\jpgs\Day 1 - 06-24` with `test_data\output-shape-examples\Day 1 - 06-24\Day 1 - 06-24.kmz`
+- Treat `test_data` as read-only. Write generated validation outputs to a disposable location and do not commit generated KMZs.
+- Compare outputs against reference KMZs where meaningful; if the reference KMZ is broader than the JPG-covered area, record that in diagnostics instead of forcing the generated shape to match the full reference.
 - Document mode behavior and known limits.
 - Confirm sources in README.
 - Review final diff against allow-list.
 - Review candidate diagnostics for at least one accepted non-concave candidate and one fallback case.
+- Create `docs/camera-boundary-v2-validation-notes.md` and record all Phase 5 validation evidence.
 
 Commands:
 
 ```powershell
 python -m unittest discover -s tests
 python -m compileall src
+git status --short
 git diff --name-only
 ```
 
@@ -636,11 +786,15 @@ Expected outputs:
 - All tests pass.
 - Diff is allow-listed only.
 - README describes current behavior accurately.
+- Real-sample diagnostics exist for the lawnmower and ROW mapping datasets.
+- `docs/camera-boundary-v2-validation-notes.md` contains Phase 5 command results, manual sample inputs, reference KMZ paths, disposable output paths, strategy selections, fallback reasons, and pass/fail notes.
 
 Failure conditions:
 
 - Real samples show repeated false positives.
+- Generated shapes expand to a full reference/pipeline boundary outside JPG-covered areas.
 - README claims behavior not verified by tests or samples.
+- `docs/camera-boundary-v2-validation-notes.md` is missing or omits either real sample dataset.
 
 Pass/fail criteria:
 
@@ -674,6 +828,8 @@ Rollback/recovery:
 | `tests/test_core_regression.py` | `test_existing_concave_mode_still_generates_polygon` | Synthetic JPG/GPS points | Valid polygon result | No polygon or invalid polygon | same |
 | `tests/test_core_regression.py` | `test_sections_still_split_connected_polygon` | Multi-section output | Connected sections created | disconnected section failure | same |
 | `tests/test_core_regression.py` | `test_unknown_outline_mode_raises_boundary_error` | Invalid mode string | Clear `BoundaryError` | Silent fallback or crash | same |
+| Manual calibration | `lawnmower_real_sample_review` | `test_data\jpgs\Lawn Mower JPGs` against matching reference KMZ | Auto chooses or evaluates lawnmower envelope without row-end artifacts | Output follows row wiggles or ignores true exterior corners | Manual Phase 5 validation |
+| Manual calibration | `row_mapping_real_sample_review` | `test_data\jpgs\Day 1 - 06-24` against matching reference KMZ | Auto handles nested ROW flights and sectioning diagnostics without expanding beyond JPG coverage | Output expands to full unrelated reference area or misses actual JPG-covered corridor | Manual Phase 5 validation |
 
 Full validation command:
 
@@ -684,26 +840,34 @@ python -m unittest discover -s tests
 ## 10. Pre-Implementation Checklist
 
 - [ ] Confirm branch with `git status --short --branch`.
-- [ ] Confirm untracked files and decide whether to leave them untouched.
+- [ ] Confirm untracked files are documented and leave non-allow-listed paths untouched.
+- [ ] Confirm `.gitignore` ignores `test_data/` with `git check-ignore -v test_data/`.
 - [ ] Confirm all allow-listed files still exist or are intentionally new.
 - [ ] Confirm Shapely version and `segmentize` support.
-- [ ] Confirm no dependency updates are needed.
+- [ ] Confirm dependency change is limited to pinning `shapely>=2.0`.
 - [ ] Confirm current source compiles with `python -m compileall src`.
 - [ ] Confirm no existing tests are hidden outside repo listing.
 - [ ] Confirm no implementation files outside allow-list will be touched.
 - [ ] Confirm final fallback behavior is the current concave hull path.
-- [ ] Confirm whether real sample JPG folders are available for calibration.
+- [ ] Confirm real sample JPG folders and reference KMZ examples remain available under `test_data`.
+- [ ] Confirm `test_data` will be treated as read-only during implementation.
 
 ## 11. Post-Implementation Validation Checklist
 
 - [ ] `python -m unittest discover -s tests` passes.
 - [ ] `python -m compileall src` passes.
 - [ ] `python .\run_jpg_boundary_gui.py` launches.
-- [ ] Manual scan/preview succeeds for at least one JPG folder if available.
-- [ ] Manual export succeeds for at least one JPG folder if available.
-- [ ] Manual KMZ input scan/export succeeds if sample KMZ is available.
+- [ ] Manual scan/preview succeeds for at least one real sample JPG folder.
+- [ ] Manual export succeeds for at least one real sample JPG folder.
+- [ ] Manual legacy KMZ-as-primary scan/export succeeds using an existing sample KMZ or a temporary test KMZ fixture.
+- [ ] Manual calibration is run against `test_data\jpgs\Lawn Mower JPGs`.
+- [ ] Manual calibration is run against `test_data\jpgs\Day 1 - 06-24`.
+- [ ] `docs/camera-boundary-v2-validation-notes.md` records both manual calibration runs.
+- [ ] Reference KMZ comparison is used only as validation/calibration context, not as an input that expands output beyond JPG coverage.
 - [ ] `git diff --name-only` contains only allow-listed files.
+- [ ] `git status --short` does not list `test_data/` or files below it.
 - [ ] No `outputs/` files are modified.
+- [ ] No `test_data/` files are modified.
 - [ ] No `__pycache__/` files are committed or intentionally modified.
 - [ ] No temporary debug prints, TODO placeholders, or mock-only behavior remain.
 - [ ] README matches implemented behavior.
@@ -743,32 +907,37 @@ Phase 5 rollback:
 General recovery:
 
 - No database, migration, cloud, deployment, or generated-output recovery is needed.
-- Any generated KMZs during manual tests should be treated as disposable and should not be committed.
+- Any generated KMZs during manual tests must be treated as disposable and must not be committed.
 - If validation fails after partial implementation, do not continue to downstream phases until the current phase passes or is rolled back.
 
-## 13. Blockers Or Items Requiring Clarification
+## 13. Resolved Decisions And Remaining Non-Decision Risks
 
-- Representative real JPG folders are needed for final Auto threshold tuning:
-  - perimeter/boundary trace
-  - pure lawnmower
-  - mixed route plus lawnmower
-  - complex corners/intersections
-- Acceptance criteria should be clarified:
-  - visual inspection only
-  - maximum boundary deviation
-  - area tolerance
-  - point containment
-  - comparison against hand-drawn/reference KMZ
-- Confirm whether GUI should expose advanced threshold settings or keep them internal.
-- Confirm whether KMZ polygon input should show outline mode controls as disabled or hide them.
-- Confirm whether output vertex count/file size has a practical upper bound.
-- Decide whether Shapely should be pinned to `>=2.0` or whether the implementation must include a manual segment densification fallback.
+No user-required open decisions remain as of 2026-06-30.
+
+Resolved decisions:
+
+- JPG folders default to `Auto`.
+- Concave hull remains the conservative fallback.
+- V2 remains JPG-primary.
+- Reference KMZs are allowed only for validation/calibration, and output must stay tied to actual JPG coverage.
+- Advanced classifier thresholds remain internal for the first implementation, with backend organization that keeps future GUI exposure practical.
+- Acceptance uses reference KMZ comparison when available; otherwise it uses agent-performed visual/manual review plus area, coverage, and boundary-deviation guardrails.
+- `shapely>=2.0` will be pinned.
+- No hard KMZ file-size or vertex-count ceiling is required.
+- Auto fallback is shown through non-blocking status/details text.
+
+Remaining non-decision risks:
+
+- Thresholds still need empirical tuning during implementation.
+- The real sample reference KMZs are guidance, not exact machine-verifiable ground truth in every case, because they were human-created from JPG outlines.
+- ROW mapping reference geometry contains multiple overlapping sub-polygons; implementation must compare it carefully and must not force generated output to match unrelated areas.
+- `test_data/` is a local ignored dataset and must be treated as read-only during implementation.
 
 ## 14. Final Readiness Assessment
 
-Ready to begin Phase 0 through Phase 2 after approval.
+Ready to begin implementation under the resolved decisions above.
 
-Not ready to declare the Auto strategy production-grade until real sample folders are used to calibrate classifier thresholds. The implementation should therefore default to conservative fallback behavior and record enough diagnostics to explain every Auto decision.
+Auto strategy production readiness still depends on Phase 5 real-sample calibration against `test_data`, but this is now an implementation validation task rather than an open planning decision.
 
 ## 15. Plan Audit And Hardening Addendum
 
@@ -776,9 +945,9 @@ This addendum audits the plan document using the repository-local guideline at `
 
 ### 15.1 Executive Summary
 
-Audit result: the plan is viable but needed hardening before implementation. The weak spots were missing internal API contracts, missing hard candidate rejection gates, insufficient dependency-version handling for `segmentize`, and incomplete user-required decisions. This addendum patches those planning gaps.
+Audit result: the plan is viable and has been hardened before implementation. The weak spots were missing internal API contracts, missing hard candidate rejection gates, insufficient dependency-version handling for `segmentize`, and previously incomplete user-required decisions. The user decisions were supplied on 2026-06-30 and have been integrated into the plan.
 
-Readiness after audit: ready to begin Phase 0 through Phase 2, with open user decisions still required before final Auto-mode calibration.
+Readiness after audit: ready to begin implementation. Remaining items are implementation validation risks, not open planning decisions.
 
 ### 15.2 Original Requirement Compliance Review
 
@@ -788,14 +957,14 @@ Readiness after audit: ready to begin Phase 0 through Phase 2, with open user de
 | Adapt useful logic from `Buffer-Zone-Generator`. | Satisfied but hardened | Plan references projected buffer, `buffer(0)`, `segmentize(10m)`, and Hausdorff-style verification from the other repo. | Yes, dependency guard added. |
 | Improve accuracy around non-linear/complex camera positions. | Partially satisfied by design | Route-aware, lawnmower, and mixed strategies are planned but not implemented. | Yes, hard acceptance gates added. |
 | Avoid lawnmower row-end artifacts. | Partially satisfied by design | Lawnmower outer-envelope strategy is planned. | Yes, additional tests and rejection gates added. |
-| Include explicit references and allow-lists. | Satisfied | Plan has evidence and strict allow-list. | Yes, test helper and conditional requirements row added. |
-| Include user-required open decisions. | Satisfied after audit | See section 15.12. | Yes |
+| Include explicit references and allow-lists. | Satisfied | Plan has evidence and strict allow-list. | Yes, test helper and Shapely dependency row added. |
+| Include user-required decisions. | Satisfied after user response | See section 15.12. | Yes |
 
 ### 15.3 Files Inspected
 
 | File | What Was Verified | Status |
 |---|---|---|
-| `docs/camera-boundary-v2-implementation-plan.md` | Full plan content, phases, allow-list, tests, blockers. | Verified directly |
+| `docs/camera-boundary-v2-implementation-plan.md` | Full plan content, phases, allow-list, tests, and resolved decisions. | Verified directly |
 | `agent_prompt_templates/detailed-implementation-audit/post_implementation_audit.md` | Audit requirements and final output format. | Verified directly |
 | `src/jpg_boundary_kmz_core.py` | Current key symbols: `GpsPoint`, `BoundaryMetadata`, `BoundaryResult`, `generate_boundary`, `generate_boundary_from_input`, `generate_boundary_from_kmz`, `save_kmz`, `format_summary`, `_read_gps_point`, `_simplify_with_containment`, `_ensure_polygon`, `BUFFER_QUAD_SEGS`. | Verified directly |
 | `src/jpg_boundary_kmz_gui.py` | GUI integration points: `BoundaryKmzApp`, `_build_ui`, `_scan_worker`, `_export_worker`, `_read_inputs`, `_draw_preview`, `_settings_key`. | Verified directly |
@@ -808,24 +977,24 @@ Readiness after audit: ready to begin Phase 0 through Phase 2, with open user de
 | Issue | Severity | Status | Patch Applied |
 |---|---:|---|---|
 | Plan named new modules but did not define stable internal contracts. | High | Confirmed planning gap | Added proposed internal API contracts. |
-| Plan relied on `segmentize` without deciding version pin vs fallback. | Medium | Confirmed planning gap | Added conditional requirement allow-list and Phase 1 failure condition. |
+| Plan relied on `segmentize` without deciding version pin vs fallback. | Medium | Resolved by user decision | Added `shapely>=2.0` requirement allow-list row and Phase 1 failure condition. |
 | Plan had scoring ideas but no hard acceptance gates before scoring. | High | Confirmed planning gap | Added required acceptance gates in Phase 3. |
 | Plan duplicated synthetic fixture needs across tests without a helper file. | Low | Likely maintainability issue | Added `tests/geometry_test_utils.py` to allow-list. |
 | Plan did not require tests for invalid outline mode. | Medium | Confirmed gap | Added regression test requirement. |
 | Plan did not require diagnostics review for both accepted and fallback Auto decisions. | Medium | Confirmed gap | Added Phase 5 task. |
-| Open user decisions existed but were not presented as an answerable checklist. | Medium | Confirmed gap | Added section 15.12. |
+| User decisions were originally open. | Medium | Resolved by user answers on 2026-06-30 | Integrated answers into section 13 and section 15.12. |
 
 ### 15.5 Patches Applied To The Plan
 
 - Added proposed internal API contracts for `OutlineMode`, `CameraPreflightResult`, and `OutlineCandidate`.
 - Added `tests/geometry_test_utils.py` to the allow-list.
-- Added conditional `requirements_jpg_boundary_kmz.txt` allow-list row only for the Shapely `segmentize` decision.
-- Removed `requirements_jpg_boundary_kmz.txt` from the unconditional exclusion list.
+- Added `requirements_jpg_boundary_kmz.txt` allow-list row for the `shapely>=2.0` pin.
+- Removed `requirements_jpg_boundary_kmz.txt` from the exclusion list.
 - Added Phase 1 requirement for a `segmentize` capability check or dependency version decision.
 - Added Phase 3 hard candidate acceptance gates.
 - Added additional strategy and regression tests for area ratio, required point coverage, disconnected section handling, and invalid outline mode.
 - Added Phase 5 diagnostics review for accepted and fallback Auto decisions.
-- Added this audit addendum and user-required open decisions.
+- Added this audit addendum and integrated user-required decisions.
 
 ### 15.6 Edge Cases And Failure Modes Reviewed
 
@@ -838,7 +1007,7 @@ Additional audit emphasis beyond the original plan:
 - Required control-point coverage must be explicit and strategy-aware.
 - MultiPolygon or disconnected candidates must not silently flow into section splitting.
 - Unknown outline mode values must fail clearly.
-- Shapely version mismatch must fail clearly or be handled with fallback code.
+- Shapely version mismatch must fail clearly if the pinned dependency is not installed.
 
 ### 15.7 Tests Added Or Updated In The Plan
 
@@ -865,6 +1034,11 @@ Select-String -Path src\jpg_boundary_kmz_core.py -Pattern "class GpsPoint|class 
 Select-String -Path src\jpg_boundary_kmz_gui.py -Pattern "class BoundaryKmzApp|def _build_ui|def _scan_worker|def _export_worker|def _read_inputs|def _draw_preview|def _settings_key"
 Select-String -Path "C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator\src\buffer_zone_generator\geometry.py" -Pattern "MAX_EXPORT_SEGMENT_M|def get_utm_epsg_for_lines|def build_buffer_geometry|buffer\(|buffer\(0\)|segmentize"
 Select-String -Path "C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator\src\buffer_zone_generator\verification.py" -Pattern "def verify_generated_output|hausdorff_distance|project_lines.distance"
+Get-ChildItem -Directory test_data\jpgs
+Get-ChildItem -Directory test_data\output-shape-examples
+Get-ChildItem -Directory test_data\jpgs | ForEach-Object { count JPG files }
+Get-ChildItem -Recurse -File test_data\output-shape-examples -Filter *.kmz
+Get-ChildItem -Directory "test_data\jpgs\Day 1 - 06-24"
 ```
 
 No test suite was run during this audit because no source implementation exists yet and the only change is this plan document.
@@ -881,32 +1055,37 @@ The highest regression risks remain:
 - Existing single-polygon KMZ input behavior regresses.
 - Section splitting receives unsupported disconnected or holed geometry.
 - GUI cache returns stale results after outline mode changes.
-- Unpinned Shapely dependency behaves differently on another machine.
+- Shapely dependency pin is missed or the installed environment still has an older Shapely version.
+- Reference KMZ comparison is over-applied to areas without JPG coverage.
 
 The plan now includes explicit tests or phase gates for each risk.
 
-### 15.11 Remaining Risks, Blockers, Or Unresolved Items
+### 15.11 Remaining Non-Decision Risks
 
-- Real-world classifier thresholds cannot be finalized from synthetic data alone.
-- The correct default UI behavior for KMZ input and advanced thresholds requires a user decision.
-- Dependency strategy for Shapely `segmentize` needs a user or implementation decision.
-- Output vertex/file-size limits need a user decision if downstream tools have constraints.
+No user-required open decisions remain.
 
-### 15.12 User-Required Open Decisions
+Remaining non-decision risks:
 
-Please answer these before Phase 3 or Phase 4 implementation begins:
+- Real-world classifier thresholds still need implementation-time calibration against `test_data`.
+- Reference KMZs are human-made guidance and are not guaranteed to be exact machine ground truth.
+- The ROW mapping reference KMZ is split into multiple overlapping sub-polygons; comparison logic must account for that.
+- `test_data/` is ignored by `.gitignore` and must remain read-only during implementation.
 
-1. Should `Auto` be the default outline mode for JPG folders, with concave hull as fallback?
-2. For KMZ polygon input, should the outline mode control be hidden, disabled with explanatory status text, or left visible but ignored?
-3. Should advanced classifier thresholds be hidden/internal for now, or exposed in the GUI under an advanced section?
-4. What acceptance target matters most for real outputs: visual inspection, maximum boundary deviation, area tolerance, point containment, or comparison against a hand-drawn/reference KMZ?
-5. Do you have representative real JPG folders for perimeter trace, pure lawnmower, mixed route/lawnmower, and complex corners/intersections?
-6. Should the project pin `shapely>=2.0` in `requirements_jpg_boundary_kmz.txt`, or should implementation include a manual densification fallback for older Shapely versions?
-7. Is there a practical KMZ file-size or vertex-count ceiling we must stay below for Google Earth or downstream tools?
-8. When Auto is uncertain, should it silently use concave fallback, or should the GUI show a warning that fallback was used?
+### 15.12 Resolved User Decisions
+
+The user answered the decision worksheet in `docs/TEMP-camera-boundary-v2-open-decisions.md`. Final decisions:
+
+1. `Auto` is the default outline mode for JPG folders.
+2. V2 remains JPG-primary. KMZs are allowed only as reference/calibration geometry, and generated shapes must stay focused on actual JPG-covered areas rather than an entire pipeline/system.
+3. Advanced classifier thresholds stay internal in the first implementation, but backend structures must make future GUI exposure practical.
+4. Acceptance follows the recommended approach: use reference KMZ comparison when available; otherwise use agent-performed visual/manual review plus area, coverage, and boundary-deviation guardrails.
+5. Real sample data is available under `test_data`: a lawnmower JPG dataset, a ROW mapping JPG dataset, and matching human-made KMZ examples.
+6. Pin `shapely>=2.0`.
+7. Do not impose a hard KMZ file-size or vertex-count ceiling.
+8. Show uncertain `Auto` fallback through non-blocking status/details text.
 
 ### 15.13 Final Readiness Assessment
 
-Ready to begin Phase 0 through Phase 2.
+Ready to begin implementation.
 
-Not ready to close the overall V2 design until the user-required open decisions above are answered and representative real samples are used to calibrate Auto-mode behavior.
+There are no unresolved user decisions. The remaining risks are validation tasks to handle during implementation, especially real-sample calibration against `test_data`.
