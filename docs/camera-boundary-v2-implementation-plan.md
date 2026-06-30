@@ -39,7 +39,11 @@ This section controls implementation. If any historical planning or audit wordin
 - Treat `test_data/` as read-only input data.
 - Keep the `.gitignore` rule for `test_data/`; `git status --short` must not list sample data files or folders.
 - Do not write generated outputs into `test_data/`, `outputs/`, or source folders during tests. Tests must use temporary directories.
+- Run validation commands without writing Python bytecode into the worktree. Use `python -B` for unit tests and the in-memory source compile command shown in this plan instead of `python -m compileall`.
 - Keep generated KMZs from manual validation disposable and uncommitted.
+- Do not launch, attach to, automate, close, kill, inspect, script, or otherwise interact with any Agisoft Metashape process, window, project, task queue, or processing job.
+- Do not read from, write to, copy, move, delete, lock, or otherwise touch Metashape project artifacts, including `.psx`, `.psz`, and `.files` project directories, unless this plan is explicitly revised with user approval.
+- No automated test, manual validation step, phase gate, or final validation command requires opening or controlling Metashape. Validation must use only JPG/KMZ file inputs and disposable non-Metashape outputs.
 - Do not modify `run_jpg_boundary_gui.py`, `src/run_jpg_boundary_gui.py`, or `run_jpg_boundary_gui.bat`.
 - Do not modify `agent_prompt_templates/`.
 - Do not modify files in `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator`.
@@ -60,10 +64,11 @@ This section controls implementation. If any historical planning or audit wordin
 - Passing phase gates are agent-verifiable and do not require human approval unless a human-blocking condition in `docs/camera-boundary-v2-implementation-orchestrator.md` is triggered.
 - If a phase fails, patch within that phase's allow-list or revise this document before touching additional files.
 - After each phase, run `git status --short` and `git diff --name-only` and confirm that only files allowed for that phase changed or remain untracked.
-- After each phase, confirm `test_data/`, `outputs/`, `__pycache__/`, and non-allow-listed files were not modified.
+- After each phase, confirm `test_data/`, `outputs/`, `__pycache__/`, `.pyc` files, and non-allow-listed files were not modified.
 - After each phase, confirm `git status --short` does not show `test_data/` or files below it.
 - Any implementation that silently changes legacy KMZ-as-primary behavior fails the gate.
 - Any implementation that lets `Auto` select invalid geometry, unsupported disconnected geometry, or a candidate outside JPG-covered areas fails the gate.
+- Any implementation or validation step that requires or risks interacting with an active Metashape instance, Metashape project file, or Metashape processing task fails the gate and must stop before acting.
 - Human review blocks progress only for the human-blocking conditions listed in `docs/camera-boundary-v2-implementation-orchestrator.md`.
 
 ### 0.5 Final Required Validation Commands
@@ -72,9 +77,9 @@ Run these before considering implementation complete:
 
 ```powershell
 git status --short --branch
-python -m unittest discover -s tests
-python -m compileall src
-python .\run_jpg_boundary_gui.py
+python -B -m unittest discover -s tests
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
+python -B -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('src').resolve())); from jpg_boundary_kmz_gui import _create_root, BoundaryKmzApp; root=_create_root(); root.withdraw(); app=BoundaryKmzApp(root); root.update_idletasks(); root.destroy(); print('GUI smoke ok')"
 git check-ignore -v test_data/
 git diff --name-only
 ```
@@ -309,7 +314,7 @@ The GUI displays human-friendly labels, and the core uses stable string values. 
 | Densified KMZ files become too large. | Low | Low | No hard ceiling is required; report vertex count for diagnostics only. | Vertex-count tests and manual export review. |
 | Existing KMZ polygon input regresses. | High | Low | Keep KMZ path separate; add regression test. | `test_kmz_input_still_works`. |
 | GUI cache returns stale results after mode change. | Medium | Medium | Include outline mode and strategy parameters in cache key. | GUI smoke test. |
-| New modules introduce circular imports. | Medium | Low | Keep dependencies directional: core imports strategy modules; strategy modules do not import GUI. | `compileall`. |
+| New modules introduce circular imports. | Medium | Low | Keep dependencies directional: core imports strategy modules; strategy modules do not import GUI. | In-memory source compile check. |
 | Dependency/version mismatch on another machine without Shapely `segmentize`. | Medium | Medium | Pin `shapely>=2.0` and keep a startup/test failure message clear if the installed version is too old. | dependency install check and tests. |
 | Reference KMZ is much larger than the JPG-covered work area. | Medium | Medium | Treat reference KMZ as validation/calibration context only; compare only relevant nearby/overlap geometry and never generate a full pipeline/system shape from reference alone. | reference scoring diagnostics and manual calibration review. |
 
@@ -386,10 +391,10 @@ No files outside this table are allowed to be edited, created, deleted, moved, f
 | `src/jpg_boundary_kmz_core.py` | Modify | Orchestrate strategies and export hardening | All test files | High | Restore old `generate_boundary` path. |
 | `src/jpg_boundary_kmz_gui.py` | Modify | Add outline mode and diagnostics | Core tests plus manual smoke | Medium | Remove mode UI and pass default. |
 | `README_JPG_BOUNDARY_KMZ.md` | Modify | Document new modes and sources | Documentation review | Low | Revert README changes. |
-| `tests/test_geometry_hardening.py` | Create | Validate geometry helper behavior | `python -m unittest ...` | Low | Delete test file. |
-| `tests/test_camera_preflight.py` | Create | Validate classifier behavior | `python -m unittest ...` | Medium | Delete test file. |
-| `tests/test_outline_strategies.py` | Create | Validate outline algorithms | `python -m unittest ...` | High | Delete test file. |
-| `tests/test_core_regression.py` | Create | Protect existing workflows | `python -m unittest ...` | Medium | Delete test file. |
+| `tests/test_geometry_hardening.py` | Create | Validate geometry helper behavior | `python -B -m unittest ...` | Low | Delete test file. |
+| `tests/test_camera_preflight.py` | Create | Validate classifier behavior | `python -B -m unittest ...` | Medium | Delete test file. |
+| `tests/test_outline_strategies.py` | Create | Validate outline algorithms | `python -B -m unittest ...` | High | Delete test file. |
+| `tests/test_core_regression.py` | Create | Protect existing workflows | `python -B -m unittest ...` | Medium | Delete test file. |
 | `tests/geometry_test_utils.py` | Create | Shared synthetic fixtures and assertions | Used by all test files | Low | Delete test helper and inline fixtures during rollback. |
 | `requirements_jpg_boundary_kmz.txt` | Modify | Pin `shapely>=2.0` so `segmentize` support is explicit | Full test suite and install check | Medium | Revert pin only if manual densification fallback is added and tested. |
 | `docs/camera-boundary-v2-validation-notes.md` | Create | Record Phase 5 real-sample/manual validation evidence | Phase 5 validation checklist | Low | Delete if implementation is rolled back before validation. |
@@ -399,12 +404,14 @@ Explicitly excluded unless the plan is revised:
 - `outputs/`
 - `__pycache__/`
 - `src/__pycache__/`
+- `*.pyc`
 - `run_jpg_boundary_gui.py`
 - `src/run_jpg_boundary_gui.py`
 - `run_jpg_boundary_gui.bat`
 - `agent_prompt_templates/`
 - `test_data/` contents, except read-only use during calibration/manual validation. Only the top-level `.gitignore` rule may reference this folder.
 - files in `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator`
+- Metashape processes, windows, task queues, processing jobs, project files, `.psx` files, `.psz` files, and `.files` project directories
 
 ## 8. Implementation Phases With Gates
 
@@ -429,8 +436,8 @@ Commands:
 ```powershell
 git status --short --branch
 git check-ignore -v test_data/
-python -c "import shapely; from shapely.geometry import Polygon; print(shapely.__version__); print(hasattr(Polygon([(0,0),(1,0),(1,1),(0,0)]), 'segmentize'))"
-python -m compileall src
+python -B -c "import shapely; from shapely.geometry import Polygon; print(shapely.__version__); print(hasattr(Polygon([(0,0),(1,0),(1,1),(0,0)]), 'segmentize'))"
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 ```
 
 Expected output:
@@ -438,7 +445,7 @@ Expected output:
 - Branch is known.
 - Existing untracked files are documented.
 - `test_data/` is ignored and does not appear as untracked sample data in normal status output.
-- `compileall` succeeds.
+- In-memory source compile succeeds without creating or modifying bytecode artifacts.
 
 Failure conditions:
 
@@ -485,8 +492,8 @@ Required tests:
 Commands:
 
 ```powershell
-python -m unittest tests.test_geometry_hardening
-python -m compileall src
+python -B -m unittest tests.test_geometry_hardening
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 git status --short
 git diff --name-only
 ```
@@ -560,8 +567,8 @@ Required tests:
 Commands:
 
 ```powershell
-python -m unittest tests.test_camera_preflight
-python -m compileall src
+python -B -m unittest tests.test_camera_preflight
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 git status --short
 git diff --name-only
 ```
@@ -646,8 +653,8 @@ Required tests:
 Commands:
 
 ```powershell
-python -m unittest tests.test_outline_strategies tests.test_core_regression
-python -m compileall src
+python -B -m unittest tests.test_outline_strategies tests.test_core_regression
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 git status --short
 git diff --name-only
 ```
@@ -714,9 +721,9 @@ Required tests:
 Commands:
 
 ```powershell
-python -m unittest discover -s tests
-python -m compileall src
-python .\run_jpg_boundary_gui.py
+python -B -m unittest discover -s tests
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
+python -B -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('src').resolve())); from jpg_boundary_kmz_gui import _create_root, BoundaryKmzApp; root=_create_root(); root.withdraw(); app=BoundaryKmzApp(root); root.update_idletasks(); root.destroy(); print('GUI smoke ok')"
 git status --short
 git diff --name-only
 ```
@@ -775,8 +782,8 @@ Tasks:
 Commands:
 
 ```powershell
-python -m unittest discover -s tests
-python -m compileall src
+python -B -m unittest discover -s tests
+python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 git status --short
 git diff --name-only
 ```
@@ -808,15 +815,15 @@ Rollback/recovery:
 
 | Test File | Test Name | Scenario | Expected Result | Failure Condition | Command |
 |---|---|---|---|---|---|
-| `tests/test_geometry_hardening.py` | `test_segmentize_caps_projected_segments` | Densify projected polygon | Exterior segments within configured limit | Long segment remains | `python -m unittest tests.test_geometry_hardening` |
+| `tests/test_geometry_hardening.py` | `test_segmentize_caps_projected_segments` | Densify projected polygon | Exterior segments within configured limit | Long segment remains | `python -B -m unittest tests.test_geometry_hardening` |
 | `tests/test_geometry_hardening.py` | `test_buffer_cleanup_returns_valid_polygon` | Constructive geometry cleanup | Valid polygon/MultiPolygon | Invalid output | same |
 | `tests/test_geometry_hardening.py` | `test_zero_buffer_does_not_create_extra_shape` | Zero buffer path | Geometry unchanged except validation | Area/shape changes unexpectedly | same |
-| `tests/test_camera_preflight.py` | `test_detects_lawnmower_parallel_rows` | Synthetic parallel rows | `lawnmower` with high confidence | Unknown or boundary trace | `python -m unittest tests.test_camera_preflight` |
+| `tests/test_camera_preflight.py` | `test_detects_lawnmower_parallel_rows` | Synthetic parallel rows | `lawnmower` with high confidence | Unknown or boundary trace | `python -B -m unittest tests.test_camera_preflight` |
 | `tests/test_camera_preflight.py` | `test_detects_boundary_trace` | Synthetic ordered perimeter | `boundary_trace` | Lawnmower classification | same |
 | `tests/test_camera_preflight.py` | `test_detects_scatter_unknown` | Random/scattered points | `scatter_unknown` or low confidence | High-confidence strategy | same |
 | `tests/test_camera_preflight.py` | `test_identifies_large_gap_candidates` | Two clusters in order | Gap candidates returned | No gap detected | same |
 | `tests/test_camera_preflight.py` | `test_missing_capture_order_uses_filename_fallback` | No timestamps | Deterministic filename order | Crash or random order | same |
-| `tests/test_outline_strategies.py` | `test_lawnmower_uses_outermost_cameras` | Interior rows and outer rows | Exterior envelope ignores interior turn noise | Zigzag boundary | `python -m unittest tests.test_outline_strategies` |
+| `tests/test_outline_strategies.py` | `test_lawnmower_uses_outermost_cameras` | Interior rows and outer rows | Exterior envelope ignores interior turn noise | Zigzag boundary | `python -B -m unittest tests.test_outline_strategies` |
 | `tests/test_outline_strategies.py` | `test_lawnmower_rejects_low_confidence_rows` | Irregular rows | Candidate rejected | Bad lawnmower accepted | same |
 | `tests/test_outline_strategies.py` | `test_route_trace_preserves_l_shape_corner` | Ordered L-shaped route | Corner preserved | Corner rounded away/excluded | same |
 | `tests/test_outline_strategies.py` | `test_route_trace_rejects_bad_order` | Same points shuffled | Route strategy rejected | Bad route accepted | same |
@@ -824,7 +831,7 @@ Rollback/recovery:
 | `tests/test_outline_strategies.py` | `test_candidate_rejected_when_area_ratio_is_implausible` | Candidate much smaller/larger than fallback | Candidate rejected with reason | Implausible candidate accepted | same |
 | `tests/test_outline_strategies.py` | `test_candidate_rejected_when_required_points_are_not_covered` | Candidate excludes required controls | Candidate rejected with reason | Missing coverage accepted | same |
 | `tests/test_outline_strategies.py` | `test_candidate_rejected_when_geometry_is_disconnected_for_sections` | Section request against disconnected candidate | Candidate rejected or clear error | Silent bad section output | same |
-| `tests/test_core_regression.py` | `test_kmz_input_still_works` | Existing KMZ input workflow | Source polygon path works | KMZ mode fails | `python -m unittest tests.test_core_regression` |
+| `tests/test_core_regression.py` | `test_kmz_input_still_works` | Existing KMZ input workflow | Source polygon path works | KMZ mode fails | `python -B -m unittest tests.test_core_regression` |
 | `tests/test_core_regression.py` | `test_existing_concave_mode_still_generates_polygon` | Synthetic JPG/GPS points | Valid polygon result | No polygon or invalid polygon | same |
 | `tests/test_core_regression.py` | `test_sections_still_split_connected_polygon` | Multi-section output | Connected sections created | disconnected section failure | same |
 | `tests/test_core_regression.py` | `test_unknown_outline_mode_raises_boundary_error` | Invalid mode string | Clear `BoundaryError` | Silent fallback or crash | same |
@@ -834,7 +841,7 @@ Rollback/recovery:
 Full validation command:
 
 ```powershell
-python -m unittest discover -s tests
+python -B -m unittest discover -s tests
 ```
 
 ## 10. Pre-Implementation Checklist
@@ -845,7 +852,7 @@ python -m unittest discover -s tests
 - [ ] Confirm all allow-listed files still exist or are intentionally new.
 - [ ] Confirm Shapely version and `segmentize` support.
 - [ ] Confirm dependency change is limited to pinning `shapely>=2.0`.
-- [ ] Confirm current source compiles with `python -m compileall src`.
+- [ ] Confirm current source compiles with the in-memory source compile command.
 - [ ] Confirm no existing tests are hidden outside repo listing.
 - [ ] Confirm no implementation files outside allow-list will be touched.
 - [ ] Confirm final fallback behavior is the current concave hull path.
@@ -854,9 +861,10 @@ python -m unittest discover -s tests
 
 ## 11. Post-Implementation Validation Checklist
 
-- [ ] `python -m unittest discover -s tests` passes.
-- [ ] `python -m compileall src` passes.
-- [ ] `python .\run_jpg_boundary_gui.py` launches.
+- [ ] `python -B -m unittest discover -s tests` passes.
+- [ ] In-memory source compile command passes without creating or modifying bytecode artifacts.
+- [ ] Bounded GUI smoke command creates and destroys the GUI without hanging.
+- [ ] Manual GUI launch/close succeeds.
 - [ ] Manual scan/preview succeeds for at least one real sample JPG folder.
 - [ ] Manual export succeeds for at least one real sample JPG folder.
 - [ ] Manual legacy KMZ-as-primary scan/export succeeds using an existing sample KMZ or a temporary test KMZ fixture.
@@ -868,7 +876,8 @@ python -m unittest discover -s tests
 - [ ] `git status --short` does not list `test_data/` or files below it.
 - [ ] No `outputs/` files are modified.
 - [ ] No `test_data/` files are modified.
-- [ ] No `__pycache__/` files are committed or intentionally modified.
+- [ ] No `__pycache__/` or `.pyc` files are committed or intentionally modified.
+- [ ] No Metashape process, active project, project artifact, task queue, or processing job was launched, inspected, modified, interrupted, or otherwise touched.
 - [ ] No temporary debug prints, TODO placeholders, or mock-only behavior remain.
 - [ ] README matches implemented behavior.
 - [ ] Details output reports selected strategy, confidence, and fallback reason.

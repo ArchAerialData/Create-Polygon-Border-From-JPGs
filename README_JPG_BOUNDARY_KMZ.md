@@ -36,23 +36,30 @@ In the app:
    existing single-polygon KMZ.
    You can also drag and drop that input folder or KMZ onto the drop field.
 2. Enter a buffer distance in feet. Use `0` for no added buffer.
-3. Use the default output file name, enter a custom file name, or choose a
+3. Choose an outline mode for JPG folders. `Auto` is the default.
+4. Use the default output file name, enter a custom file name, or choose a
    different `.kmz` path.
-4. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
-5. For multiple shapes, set overlap feet and shape label.
-6. Click `Scan / Preview`.
-7. Click `Export KMZ`.
-8. Click `View Output Folder` in the completion popup or main window to open
+5. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
+6. For multiple shapes, set overlap feet and shape label.
+7. Click `Scan / Preview`.
+8. Click `Export KMZ`.
+9. Click `View Output Folder` in the completion popup or main window to open
    the folder containing the KMZ.
-9. Click `View Details` when you want the full scan/export summary.
+10. Click `View Details` when you want the full scan/export summary.
 
 ## Behavior
 
 - JPG discovery is recursive and case-insensitive for `.jpg` and `.jpeg`.
 - GPS coordinates are read from EXIF.
+- JPG folders default to `Auto` outline mode. Auto evaluates route-aware and
+  lawnmower-envelope candidates, but falls back to the conservative concave
+  hull when confidence or geometry guardrails are not met.
+- Manual JPG outline modes are `Concave hull`, `Route-aware`, and `Lawnmower
+  outer envelope`.
 - Existing KMZ input must contain exactly one polygon with an outer boundary
   ring. KMZ files with multiple polygons or polygon holes are rejected because
   splitting starts from a single parent outline.
+- Existing KMZ input bypasses JPG outline modes and uses source-polygon mode.
 - Pasted and dropped paths may be quoted; `file://` paths are normalized when
   the operating system supplies them.
 - If `tkinterdnd2` is installed, the input can be set by dragging and dropping
@@ -69,8 +76,10 @@ In the app:
   standard UTM zone formula.
 - The outline is intentionally generalized so it bridges small lawnmower-path
   divots instead of tracing every row-end wiggle.
-- Auto containment padding and user buffers use rounded joins so sharp bends
-  are less likely to be clipped by angular mitered corners.
+- Auto containment padding and user buffers use high-resolution rounded joins,
+  geometry cleanup, and projected segment densification before export.
+- Details report preflight pattern, camera order source, selected strategy,
+  confidence, candidate summary, and any non-blocking Auto fallback reason.
 - When `# of Shapes` is greater than `1`, the app recursively splits the
   buffered outline into connected equal-area sections.
 - Section overlap is clipped inside the parent outline. A `50 ft` overlap means
@@ -92,7 +101,7 @@ The current machine already has the required packages available:
 - `exifread`
 - `numpy`
 - `scipy`
-- `shapely`
+- `shapely>=2.0`
 - `pyproj`
 - `simplekml`
 - `matplotlib`
@@ -110,6 +119,7 @@ python -m pip install -r "C:\path\to\jpg_boundary_kmz_app\requirements_jpg_bound
 
 - Shapely concave hull: https://shapely.readthedocs.io/en/stable/reference/shapely.concave_hull.html
 - Shapely buffer: https://shapely.readthedocs.io/en/stable/reference/shapely.buffer.html
+- Shapely segmentize: https://shapely.readthedocs.io/en/stable/reference/shapely.segmentize.html
 - Shapely splitting/intersection behavior: https://shapely.readthedocs.io/en/stable/manual.html#splitting
 - pyproj Transformer: https://pyproj4.github.io/pyproj/stable/api/transformer.html
 - simplekml documentation: https://simplekml.readthedocs.io/

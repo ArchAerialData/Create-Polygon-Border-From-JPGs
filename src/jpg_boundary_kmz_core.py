@@ -7,6 +7,7 @@ import math
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -15,7 +16,6 @@ import numpy as np
 import simplekml
 from pyproj import CRS, Transformer
 from scipy.spatial import cKDTree
-from shapely import concave_hull
 from shapely.affinity import rotate
 from shapely.geometry import box
 from shapely.geometry import GeometryCollection, MultiPoint, MultiPolygon, Polygon
@@ -23,13 +23,26 @@ from shapely.ops import transform as transform_geometry
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
+from camera_preflight import analyze_camera_preflight
+from geometry_hardening import (
+    DEFAULT_BUFFER_QUAD_SEGS,
+    buffer_projected_geometry,
+    densify_projected_geometry,
+)
+from outline_strategies import (
+    OUTLINE_MODE_AUTO,
+    OUTLINE_MODES,
+    select_outline,
+    summarize_candidates,
+)
+
 
 FEET_PER_METER = 3.280839895
 METERS_PER_FOOT = 0.3048
 DEFAULT_CONCAVE_RATIO = 0.15
 DEFAULT_SIMPLIFY_FACTOR = 0.25
 BUFFER_JOIN_STYLE = "round"
-BUFFER_QUAD_SEGS = 8
+BUFFER_QUAD_SEGS = DEFAULT_BUFFER_QUAD_SEGS
 BUFFER_MITRE_LIMIT = 3.0
 MAX_SECTION_COUNT = 100
 ACRES_PER_SQUARE_METER = 0.000247105381467
@@ -45,6 +58,7 @@ class GpsPoint:
     path: Path
     lat: float
     lon: float
+    capture_time: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,15 @@ class BoundaryMetadata:
     section_area_min_acres: float
     section_area_max_acres: float
     sections_connected: bool
+    preflight_pattern: str = ""
+    preflight_confidence: float = 0.0
+    order_source: str = ""
+    preflight_warnings: str = ""
+    outline_mode: str = ""
+    selected_strategy: str = ""
+    strategy_confidence: float = 0.0
+    fallback_reason: str = ""
+    candidate_summary: str = ""
 
 
 @dataclass
@@ -128,6 +151,7 @@ def generate_boundary(
     shape_label: str = "",
     concave_ratio: float = DEFAULT_CONCAVE_RATIO,
     simplify_factor: float = DEFAULT_SIMPLIFY_FACTOR,
+    outline_mode: str = OUTLINE_MODE_AUTO,
 ) -> BoundaryResult:
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
@@ -139,6 +163,8 @@ def generate_boundary(
         raise BoundaryError(f"# of Shapes must be between 1 and {MAX_SECTION_COUNT}.")
     if overlap_ft < 0:
         raise BoundaryError("Overlap distance must be 0 or greater.")
+    if outline_mode not in OUTLINE_MODES:
+        raise BoundaryError(f"Unknown outline mode: {outline_mode}")
 
     parent_folder = Path(parent_folder)
     jpgs = find_jpgs(parent_folder)
@@ -160,13 +186,20 @@ def generate_boundary(
 
     xs, ys = to_projected.transform(lons, lats)
     projected_points = np.column_stack([xs, ys])
+    preflight = analyze_camera_preflight(gps_points, projected_points)
     unique_points = np.unique(np.round(projected_points, 6), axis=0)
     if len(unique_points) < 3:
         raise BoundaryError("The geotagged JPGs do not contain 3 unique positions.")
 
     point_geometry = MultiPoint(unique_points)
-    raw_hull = concave_hull(point_geometry, ratio=concave_ratio, allow_holes=False)
-    hull = _ensure_polygon(raw_hull, point_geometry)
+    outline_selection = select_outline(
+        mode=outline_mode,
+        projected_points=projected_points,
+        preflight=preflight,
+        concave_ratio=concave_ratio,
+        section_count=section_count,
+    )
+    hull = _ensure_polygon(outline_selection.selected.polygon_projected, point_geometry)
     if hull.area <= 0:
         raise BoundaryError("The camera positions did not produce a usable polygon.")
 
@@ -180,16 +213,17 @@ def generate_boundary(
 
     buffer_m = buffer_ft * METERS_PER_FOOT
     if buffer_m > 0:
-        final_projected = base_polygon.buffer(
+        final_projected = buffer_projected_geometry(
+            base_polygon,
             buffer_m,
             join_style=BUFFER_JOIN_STYLE,
-            quad_segs=BUFFER_QUAD_SEGS,
             mitre_limit=BUFFER_MITRE_LIMIT,
         )
         final_projected = _ensure_polygon(final_projected, point_geometry)
     else:
         final_projected = base_polygon
 
+    final_projected = _ensure_polygon(densify_projected_geometry(final_projected))
     final_wgs84 = transform_geometry(
         lambda x, y, z=None: to_wgs84.transform(x, y),
         final_projected,
@@ -238,6 +272,15 @@ def generate_boundary(
         section_area_min_acres=section_area_min_acres,
         section_area_max_acres=section_area_max_acres,
         sections_connected=sections_connected,
+        preflight_pattern=preflight.pattern,
+        preflight_confidence=preflight.confidence,
+        order_source=preflight.order_source,
+        preflight_warnings="; ".join(preflight.warnings),
+        outline_mode=outline_mode,
+        selected_strategy=outline_selection.selected.strategy,
+        strategy_confidence=outline_selection.selected.confidence,
+        fallback_reason=outline_selection.fallback_reason,
+        candidate_summary=summarize_candidates(outline_selection.candidates),
     )
 
     return BoundaryResult(
@@ -257,6 +300,7 @@ def generate_boundary_from_input(
     section_count: int = 1,
     overlap_ft: float = 50.0,
     shape_label: str = "",
+    outline_mode: str = OUTLINE_MODE_AUTO,
 ) -> BoundaryResult:
     input_path = Path(input_path)
     if input_path.is_dir():
@@ -266,6 +310,7 @@ def generate_boundary_from_input(
             section_count=section_count,
             overlap_ft=overlap_ft,
             shape_label=shape_label,
+            outline_mode=outline_mode,
         )
     if input_path.is_file() and input_path.suffix.lower() == ".kmz":
         return generate_boundary_from_kmz(
@@ -314,16 +359,17 @@ def generate_boundary_from_kmz(
 
     buffer_m = buffer_ft * METERS_PER_FOOT
     if buffer_m > 0:
-        final_projected = source_projected.buffer(
+        final_projected = buffer_projected_geometry(
+            source_projected,
             buffer_m,
             join_style=BUFFER_JOIN_STYLE,
-            quad_segs=BUFFER_QUAD_SEGS,
             mitre_limit=BUFFER_MITRE_LIMIT,
         )
         final_projected = _ensure_polygon(final_projected)
     else:
         final_projected = source_projected
 
+    final_projected = _ensure_polygon(densify_projected_geometry(final_projected))
     final_wgs84 = transform_geometry(
         lambda x, y, z=None: to_wgs84.transform(x, y),
         final_projected,
@@ -371,6 +417,9 @@ def generate_boundary_from_kmz(
         section_area_min_acres=section_area_min_acres,
         section_area_max_acres=section_area_max_acres,
         sections_connected=True,
+        outline_mode="source_polygon",
+        selected_strategy="source_polygon",
+        strategy_confidence=1.0,
     )
 
     return BoundaryResult(
@@ -439,11 +488,23 @@ def format_summary(metadata: BoundaryMetadata) -> str:
                 f"JPG/JPEG files found: {metadata.jpg_count:,}",
                 f"Usable GPS points: {metadata.gps_count:,}",
                 f"Skipped files without GPS: {metadata.skipped_count:,}",
+                f"Preflight pattern: {metadata.preflight_pattern or 'Not evaluated'}",
+                f"Preflight confidence: {metadata.preflight_confidence:.2f}",
+                f"Camera order source: {metadata.order_source or 'Not evaluated'}",
+                f"Outline mode: {metadata.outline_mode or 'Not evaluated'}",
+                f"Selected strategy: {metadata.selected_strategy or 'Not evaluated'}",
+                f"Strategy confidence: {metadata.strategy_confidence:.2f}",
                 f"Median camera spacing: {metadata.median_spacing_ft:,.1f} ft",
                 f"Auto smoothing distance: {metadata.smoothing_ft:,.1f} ft",
                 f"Auto containment padding: {metadata.containment_padding_ft:,.1f} ft",
             ]
         )
+        if metadata.preflight_warnings:
+            lines.append(f"Preflight warnings: {metadata.preflight_warnings}")
+        if metadata.fallback_reason:
+            lines.append(f"Fallback reason: {metadata.fallback_reason}")
+        if metadata.candidate_summary:
+            lines.append(f"Candidate summary: {metadata.candidate_summary}")
     else:
         lines.append("Source polygon: 1")
     lines.extend(
@@ -494,10 +555,10 @@ def _build_sections(
     for index, base_part in enumerate(sorted_parts, start=1):
         output_part = base_part
         if half_overlap_m > 0:
-            output_part = base_part.buffer(
+            output_part = buffer_projected_geometry(
+                base_part,
                 half_overlap_m,
                 join_style=BUFFER_JOIN_STYLE,
-                quad_segs=BUFFER_QUAD_SEGS,
                 mitre_limit=BUFFER_MITRE_LIMIT,
             ).intersection(parent_polygon)
 
@@ -508,6 +569,7 @@ def _build_sections(
                 "Try fewer shapes or a smaller overlap distance."
             )
 
+        output_part = _ensure_polygon(densify_projected_geometry(output_part))
         polygon_wgs84 = transform_geometry(
             lambda x, y, z=None: to_wgs84.transform(x, y),
             output_part,
@@ -808,7 +870,6 @@ def _read_gps_point(path: Path) -> GpsPoint | None:
                 tags = exifread.process_file(
                     image_file,
                     details=False,
-                    stop_tag="GPSLongitude",
                 )
     except Exception:
         return None
@@ -828,7 +889,28 @@ def _read_gps_point(path: Path) -> GpsPoint | None:
 
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
-    return GpsPoint(path=path, lat=lat, lon=lon)
+    return GpsPoint(path=path, lat=lat, lon=lon, capture_time=_read_capture_time(tags))
+
+
+def _read_capture_time(tags: dict[str, object]) -> datetime | None:
+    for tag_name in ("EXIF DateTimeOriginal", "Image DateTime"):
+        tag = tags.get(tag_name)
+        if not tag:
+            continue
+        parsed = _parse_exif_datetime(str(tag))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_exif_datetime(value: str) -> datetime | None:
+    value = value.strip()
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def _dms_to_decimal(values: list[object], ref: str) -> float:
@@ -874,10 +956,10 @@ def _simplify_with_containment(
 
     padding_m = _max_distance_outside(candidate, points)
     if padding_m > 0:
-        candidate = candidate.buffer(
+        candidate = buffer_projected_geometry(
+            candidate,
             padding_m + 0.01,
             join_style=BUFFER_JOIN_STYLE,
-            quad_segs=BUFFER_QUAD_SEGS,
             mitre_limit=BUFFER_MITRE_LIMIT,
         )
         candidate = _ensure_polygon(candidate, points)
@@ -954,12 +1036,24 @@ def _build_kml_description(
                 f"JPG/JPEG files found: {metadata.jpg_count:,}",
                 f"Usable GPS points: {metadata.gps_count:,}",
                 f"Skipped files without GPS: {metadata.skipped_count:,}",
+                f"Preflight pattern: {metadata.preflight_pattern or 'Not evaluated'}",
+                f"Preflight confidence: {metadata.preflight_confidence:.2f}",
+                f"Camera order source: {metadata.order_source or 'Not evaluated'}",
+                f"Outline mode: {metadata.outline_mode or 'Not evaluated'}",
+                f"Selected strategy: {metadata.selected_strategy or 'Not evaluated'}",
+                f"Strategy confidence: {metadata.strategy_confidence:.2f}",
                 f"Concave hull ratio: {metadata.concave_ratio}",
                 f"Median camera spacing: {metadata.median_spacing_ft:,.1f} ft",
                 f"Auto smoothing distance: {metadata.smoothing_ft:,.1f} ft",
                 f"Auto containment padding: {metadata.containment_padding_ft:,.1f} ft",
             ]
         )
+        if metadata.preflight_warnings:
+            lines.append(f"Preflight warnings: {metadata.preflight_warnings}")
+        if metadata.fallback_reason:
+            lines.append(f"Fallback reason: {metadata.fallback_reason}")
+        if metadata.candidate_summary:
+            lines.append(f"Candidate summary: {metadata.candidate_summary}")
     else:
         lines.append("Source polygon: 1")
     if metadata.section_count > 1:

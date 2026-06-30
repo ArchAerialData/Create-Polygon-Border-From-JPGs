@@ -27,11 +27,24 @@ from jpg_boundary_kmz_core import (
     generate_boundary_from_input,
     save_kmz,
 )
+from outline_strategies import (
+    OUTLINE_MODE_AUTO,
+    OUTLINE_MODE_CONCAVE,
+    OUTLINE_MODE_LAWNMOWER,
+    OUTLINE_MODE_ROUTE_AWARE,
+)
 
 
 SRC_DIR = Path(__file__).resolve().parent
 APP_ROOT = SRC_DIR.parent
 DEFAULT_OUTPUT_DIR = APP_ROOT / "outputs"
+OUTLINE_MODE_LABELS = {
+    "Auto": OUTLINE_MODE_AUTO,
+    "Concave hull": OUTLINE_MODE_CONCAVE,
+    "Route-aware": OUTLINE_MODE_ROUTE_AWARE,
+    "Lawnmower outer envelope": OUTLINE_MODE_LAWNMOWER,
+}
+OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
 
 
 class BoundaryKmzApp:
@@ -45,6 +58,7 @@ class BoundaryKmzApp:
         self.buffer_var = tk.StringVar(value="0")
         self.output_name_var = tk.StringVar(value=default_output_path.stem)
         self.output_var = tk.StringVar(value=str(default_output_path))
+        self.outline_mode_var = tk.StringVar(value="Auto")
         self.section_count_var = tk.StringVar(value="1")
         self.overlap_var = tk.StringVar(value="50")
         self.shape_label_var = tk.StringVar(value=self._default_shape_label())
@@ -56,15 +70,18 @@ class BoundaryKmzApp:
 
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cached_result: BoundaryResult | None = None
-        self._cached_settings: tuple[str, float, int, float, str] | None = None
+        self._cached_settings: tuple[str, float, int, float, str, str] | None = None
         self._busy = False
 
         self._build_ui()
         self.output_name_var.trace_add("write", self._on_output_name_changed)
         self.output_var.trace_add("write", self._on_output_changed)
+        self.parent_var.trace_add("write", self._on_input_changed)
+        self.outline_mode_var.trace_add("write", self._on_outline_mode_changed)
         self.section_count_var.trace_add("write", self._on_section_options_changed)
         self.overlap_var.trace_add("write", self._on_section_options_changed)
         self.shape_label_var.trace_add("write", self._on_shape_label_changed)
+        self._update_outline_mode_state()
         self._update_section_control_state()
         self.root.after(100, self._drain_queue)
 
@@ -75,7 +92,7 @@ class BoundaryKmzApp:
         self.root.rowconfigure(0, weight=1)
 
         root_frame.columnconfigure(1, weight=1)
-        root_frame.rowconfigure(7, weight=1)
+        root_frame.rowconfigure(8, weight=1)
 
         ttk.Label(root_frame, text="Input folder or KMZ").grid(
             row=0,
@@ -125,15 +142,32 @@ class BoundaryKmzApp:
             pady=4,
         )
 
-        ttk.Label(root_frame, text="Output file name").grid(
+        self.outline_mode_label = ttk.Label(root_frame, text="Outline mode")
+        self.outline_mode_label.grid(
             row=3,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
+        self.outline_mode_combo = ttk.Combobox(
+            root_frame,
+            textvariable=self.outline_mode_var,
+            values=list(OUTLINE_MODE_LABELS.keys()),
+            state="readonly",
+            width=28,
+        )
+        self.outline_mode_combo.grid(row=3, column=1, sticky="w", pady=4)
+
+        ttk.Label(root_frame, text="Output file name").grid(
+            row=4,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
         output_name_frame = ttk.Frame(root_frame)
-        output_name_frame.grid(row=3, column=1, sticky="ew", pady=4)
+        output_name_frame.grid(row=4, column=1, sticky="ew", pady=4)
         output_name_frame.columnconfigure(0, weight=1)
         ttk.Entry(
             output_name_frame,
@@ -147,21 +181,21 @@ class BoundaryKmzApp:
         )
 
         ttk.Label(root_frame, text="Output KMZ").grid(
-            row=4,
+            row=5,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
         ttk.Entry(root_frame, textvariable=self.output_var).grid(
-            row=4,
+            row=5,
             column=1,
             sticky="ew",
             pady=4,
         )
         output_buttons = ttk.Frame(root_frame)
         output_buttons.grid(
-            row=4,
+            row=5,
             column=2,
             sticky="ew",
             padx=(8, 0),
@@ -181,7 +215,7 @@ class BoundaryKmzApp:
         ).grid(row=0, column=1, sticky="ew")
 
         sections_frame = ttk.LabelFrame(root_frame, text="Sections")
-        sections_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        sections_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         sections_frame.columnconfigure(5, weight=1)
 
         ttk.Label(sections_frame, text="# of Shapes").grid(
@@ -259,7 +293,7 @@ class BoundaryKmzApp:
         self._register_drop_target()
 
         button_frame = ttk.Frame(root_frame)
-        button_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        button_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         button_frame.columnconfigure(3, weight=1)
 
         self.scan_button = ttk.Button(
@@ -291,7 +325,7 @@ class BoundaryKmzApp:
         )
 
         preview_frame = ttk.LabelFrame(root_frame, text="Preview")
-        preview_frame.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        preview_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
 
@@ -469,6 +503,13 @@ class BoundaryKmzApp:
             sync_name=False,
         )
 
+    def _on_input_changed(self, *_args: object) -> None:
+        self._update_outline_mode_state()
+        self._invalidate_cache()
+
+    def _on_outline_mode_changed(self, *_args: object) -> None:
+        self._invalidate_cache()
+
     def _on_section_options_changed(self, *_args: object) -> None:
         self._update_section_control_state()
         self._refresh_shape_label_default()
@@ -491,6 +532,16 @@ class BoundaryKmzApp:
         ):
             widget.configure(state=state)
 
+    def _update_outline_mode_state(self) -> None:
+        input_text = self.parent_var.get().strip()
+        is_kmz = False
+        if input_text:
+            input_path = self._path_from_text(input_text)
+            is_kmz = input_path.suffix.lower() == ".kmz"
+        state = "disabled" if is_kmz else "readonly"
+        self.outline_mode_combo.configure(state=state)
+        self.outline_mode_label.configure(state="disabled" if is_kmz else "normal")
+
     def _current_section_count_for_state(self) -> int:
         try:
             return int(self.section_count_var.get().strip())
@@ -510,7 +561,15 @@ class BoundaryKmzApp:
 
     def _scan_clicked(self) -> None:
         try:
-            input_path, buffer_ft, section_count, overlap_ft, shape_label, _ = (
+            (
+                input_path,
+                buffer_ft,
+                section_count,
+                overlap_ft,
+                shape_label,
+                outline_mode,
+                _,
+            ) = (
                 self._read_inputs(require_output=False)
             )
         except BoundaryError as error:
@@ -520,7 +579,14 @@ class BoundaryKmzApp:
         self._set_busy(True, "Reading input and building preview...")
         worker = threading.Thread(
             target=self._scan_worker,
-            args=(input_path, buffer_ft, section_count, overlap_ft, shape_label),
+            args=(
+                input_path,
+                buffer_ft,
+                section_count,
+                overlap_ft,
+                shape_label,
+                outline_mode,
+            ),
             daemon=True,
         )
         worker.start()
@@ -533,6 +599,7 @@ class BoundaryKmzApp:
                 section_count,
                 overlap_ft,
                 shape_label,
+                outline_mode,
                 output_path,
             ) = self._read_inputs(require_output=True)
         except BoundaryError as error:
@@ -553,6 +620,7 @@ class BoundaryKmzApp:
             section_count,
             overlap_ft,
             shape_label,
+            outline_mode,
         )
         cached_result = (
             self._cached_result if self._cached_settings == settings else None
@@ -567,6 +635,7 @@ class BoundaryKmzApp:
                 section_count,
                 overlap_ft,
                 shape_label,
+                outline_mode,
                 output_path,
                 cached_result,
             ),
@@ -581,6 +650,7 @@ class BoundaryKmzApp:
         section_count: int,
         overlap_ft: float,
         shape_label: str,
+        outline_mode: str,
     ) -> None:
         try:
             result = generate_boundary_from_input(
@@ -589,6 +659,7 @@ class BoundaryKmzApp:
                 section_count=section_count,
                 overlap_ft=overlap_ft,
                 shape_label=shape_label,
+                outline_mode=outline_mode,
             )
         except Exception as error:
             self._queue.put(("error", error))
@@ -602,6 +673,7 @@ class BoundaryKmzApp:
         section_count: int,
         overlap_ft: float,
         shape_label: str,
+        outline_mode: str,
         output_path: Path,
         cached_result: BoundaryResult | None,
     ) -> None:
@@ -612,6 +684,7 @@ class BoundaryKmzApp:
                 section_count=section_count,
                 overlap_ft=overlap_ft,
                 shape_label=shape_label,
+                outline_mode=outline_mode,
             )
             saved_path = save_kmz(result, output_path)
         except Exception as error:
@@ -636,10 +709,11 @@ class BoundaryKmzApp:
                     result.metadata.section_count,
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
+                    result.metadata.outline_mode,
                 )
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
-                self._set_busy(False, "Preview ready.")
+                self._set_busy(False, self._ready_status(result, "Preview ready."))
             elif kind == "export_done":
                 result, saved_path = payload
                 assert isinstance(result, BoundaryResult)
@@ -651,13 +725,14 @@ class BoundaryKmzApp:
                     result.metadata.section_count,
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
+                    result.metadata.outline_mode,
                 )
                 self._write_status(
                     format_summary(result.metadata)
                     + f"\n\nSaved KMZ: {saved_path}"
                 )
                 self._draw_preview(result)
-                self._set_busy(False, "KMZ exported.")
+                self._set_busy(False, self._ready_status(result, "KMZ exported."))
                 self._show_export_success(saved_path)
             elif kind == "error":
                 error = payload
@@ -733,7 +808,7 @@ class BoundaryKmzApp:
     def _read_inputs(
         self,
         require_output: bool,
-    ) -> tuple[Path, float, int, float, str, Path | None]:
+    ) -> tuple[Path, float, int, float, str, str, Path | None]:
         input_text = self.parent_var.get().strip()
         if not input_text:
             raise BoundaryError("Choose a JPG folder or an existing KMZ file.")
@@ -800,7 +875,16 @@ class BoundaryKmzApp:
         if require_output:
             output_path = current_output_path
 
-        return input_path, buffer_ft, section_count, overlap_ft, shape_label, output_path
+        outline_mode = self._selected_outline_mode(input_path)
+        return (
+            input_path,
+            buffer_ft,
+            section_count,
+            overlap_ft,
+            shape_label,
+            outline_mode,
+            output_path,
+        )
 
     def _draw_preview(self, result: BoundaryResult) -> None:
         self.axes.clear()
@@ -925,6 +1009,10 @@ class BoundaryKmzApp:
         state = "disabled" if busy else "normal"
         self.scan_button.configure(state=state)
         self.export_button.configure(state=state)
+        if busy:
+            self.outline_mode_combo.configure(state="disabled")
+        else:
+            self._update_outline_mode_state()
         self.status_var.set(status)
 
     def _invalidate_cache(self) -> None:
@@ -934,7 +1022,22 @@ class BoundaryKmzApp:
     def _set_input_path(self, input_path: Path) -> None:
         self.parent_var.set(str(input_path))
         self._set_output_path(self._default_output_path(input_path))
+        self._update_outline_mode_state()
         self._invalidate_cache()
+
+    def _selected_outline_mode(self, input_path: Path) -> str:
+        if input_path.is_file() and input_path.suffix.lower() == ".kmz":
+            return OUTLINE_MODE_SOURCE_POLYGON
+        label = self.outline_mode_var.get().strip() or "Auto"
+        if label not in OUTLINE_MODE_LABELS:
+            raise BoundaryError("Choose a valid outline mode.")
+        return OUTLINE_MODE_LABELS[label]
+
+    @staticmethod
+    def _ready_status(result: BoundaryResult, base_status: str) -> str:
+        if result.metadata.fallback_reason:
+            return f"{base_status} Auto fallback used."
+        return base_status
 
     def _parse_dropped_paths(self, data: str) -> list[Path]:
         if not data:
@@ -981,13 +1084,15 @@ class BoundaryKmzApp:
         section_count: int,
         overlap_ft: float,
         shape_label: str,
-    ) -> tuple[str, float, int, float, str]:
+        outline_mode: str,
+    ) -> tuple[str, float, int, float, str, str]:
         return (
             str(Path(input_path).resolve()).lower(),
             float(buffer_ft),
             int(section_count),
             float(overlap_ft),
             shape_label.strip(),
+            outline_mode,
         )
 
     @staticmethod
