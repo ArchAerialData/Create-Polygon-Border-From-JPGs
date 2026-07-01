@@ -1,8 +1,8 @@
 # KML/KMZ Polyline Input Consolidation Open Questions
 
-Status: unresolved decision worksheet.
+Status: resolved decision worksheet.
 
-This file lists decisions that should be answered before implementation starts. The main implementation plan is:
+This file records decisions answered before implementation. The main implementation plan is:
 
 ```text
 docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-implementation-plan.md
@@ -19,20 +19,33 @@ Fixed decisions already captured from the user:
 
 ## Answer Record
 
-Use this block to answer quickly:
+Resolved answers:
 
 ```text
-D1: Recommendation accepted.
-D2: Recommendation accepted.
+D1: Always export KMZ.
+D2: Prefer LineStrings when mixed LineString/Polygon files are loaded; ignore polygons and report that they were ignored.
 D3: Option A
-D4: Recommendation accepted.
-D5: Recommendation accepted.
-D6: Option C would be nice, if the preview can be updated upon changing directions within the UI.
-D7: Recommendation accepted.
-D8: Recommendation accepted.
-D9: Recommendation accepted.
-D10: Recommendation accepted.
+D4: Reject disconnected polyline buffer outputs for the first implementation.
+D5: Accept single-polygon KML and KMZ inputs; ignore/fill polygon interiors.
+D6: Option C: add user-facing split direction control now, with preview updates when direction changes.
+D7: Apply overlap along shared split boundaries.
+D8: Fail with a clear message if natural splitting cannot produce connected, clean sections.
+D9: Visual regularity wins within area tolerance.
+D10: Use 20 percent area variance tolerance from average base section area.
 ```
+
+Resolved interpretation:
+
+- D1: Always export KMZ.
+- D2: Prefer `LineString` geometry when mixed LineString/Polygon files are loaded, ignore polygons for generation, and report that polygons were ignored.
+- D3: Do not preserve source linework in exported KMZs.
+- D4: Reject disconnected polyline buffer outputs for the first implementation.
+- D5: Accept single-polygon KML and KMZ inputs. Polygon interiors are ignored/filled so only exterior boundaries drive output.
+- D6: Add a user-facing split direction control now, and make preview updates respond to direction changes.
+- D7: Apply overlap along shared split boundaries.
+- D8: Fail with a clear message if natural splitting cannot produce connected, clean sections.
+- D9: Visual regularity wins within area tolerance.
+- D10: Use a 20 percent area variance tolerance from average base section area.
 
 ## D1. Should This App Continue Exporting Only KMZ, Or Mirror KML/KMZ Input Type?
 
@@ -58,7 +71,7 @@ Impact:
 - Adds KML output writer behavior to this app.
 - Requires more UI and test coverage.
 
-### Recommended Decision
+### Resolved Decision
 
 Option A: always export KMZ for this app. The core goal is consolidation of input and geometry behavior, not adding a second output format.
 
@@ -93,9 +106,9 @@ Impact:
 - Matches legacy KMZ-as-polygon behavior.
 - Bad for the new polyline workflow because preserved generated polygons can mask the original linework.
 
-### Recommended Decision
+### Resolved Decision
 
-Option A if the app clearly reports `Using source LineStrings; polygons ignored`. Otherwise Option B if strictness is preferred.
+Option A. Prefer `LineString`s when any are present, ignore polygon geometry for generation, and report `Using source LineStrings; polygons ignored`.
 
 ## D3. Should Source Linework Be Preserved In The Exported KMZ?
 
@@ -127,7 +140,7 @@ Impact:
 - Best traceability.
 - Worst chance of cluttering crop KMZs and creating mixed-input ambiguity later.
 
-### Recommended Decision
+### Resolved Decision
 
 Option A for first implementation. Add source line preservation later only if debugging needs it.
 
@@ -162,7 +175,7 @@ Impact:
 - High risk of covering areas not represented by the linework.
 - Not recommended.
 
-### Recommended Decision
+### Resolved Decision
 
 Option A for first implementation. Add multi-parent support only after the single-parent workflow is stable.
 
@@ -189,9 +202,9 @@ Impact:
 - Smaller behavior change.
 - Slightly confusing because LineString KML would work but polygon KML would not.
 
-### Recommended Decision
+### Resolved Decision
 
-Option A, as long as polygon KML gets the same validation and exterior-only cleanup.
+Option A. Accept single-polygon KML and KMZ inputs. If the source polygon contains interior rings, ignore/fill interiors so only the exterior boundary is used.
 
 ## D6. How Should Natural Split Direction Be Chosen?
 
@@ -225,9 +238,9 @@ Impact:
 - Adds UI complexity and more validation.
 - Probably premature for first implementation.
 
-### Recommended Decision
+### Resolved Decision
 
-Option B. Use source-line orientation when available, otherwise parent polygon orientation. Keep user-facing direction control out of the first implementation.
+Option C. Add a user-facing split direction control now. The preview must update when the direction changes. The control should still provide an `Auto` option so users can start from the source-line or parent-polygon inferred direction.
 
 ## D7. How Should Section Overlap Be Applied?
 
@@ -259,7 +272,7 @@ Impact:
 - Flexible.
 - Adds UI and test complexity.
 
-### Recommended Decision
+### Resolved Decision
 
 Option A for this workflow.
 
@@ -293,7 +306,7 @@ Impact:
 - Useful during validation.
 - Not a deterministic product behavior.
 
-### Recommended Decision
+### Resolved Decision
 
 Option A for production behavior. During implementation validation, stop for review if this happens on the known North 2 sample.
 
@@ -326,7 +339,7 @@ Impact:
 - Best aesthetics.
 - May produce unexpectedly uneven crop sizes.
 
-### Recommended Decision
+### Resolved Decision
 
 Option B. Use visual regularity first, with section area variance reported in details.
 
@@ -359,6 +372,6 @@ Impact:
 - Most flexible.
 - Harder to enforce output quality.
 
-### Recommended Decision
+### Resolved Decision
 
 Option B for first implementation, with details output showing min/max section area.
