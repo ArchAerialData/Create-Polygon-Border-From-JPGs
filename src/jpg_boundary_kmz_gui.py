@@ -571,6 +571,10 @@ class BoundaryKmzApp:
         self._shape_label_touched = True
         self._invalidate_cache()
 
+    def _on_split_direction_changed(self, *_args: object) -> None:
+        self._update_section_control_state()
+        self._invalidate_cache()
+
     def _update_section_control_state(self) -> None:
         enabled = self._current_section_count_for_state() > 1
         state = "normal" if enabled else "disabled"
@@ -579,18 +583,24 @@ class BoundaryKmzApp:
             self.overlap_entry,
             self.shape_label_label,
             self.shape_label_entry,
+            self.split_direction_label,
         ):
             widget.configure(state=state)
+        self.split_direction_combo.configure(state="readonly" if enabled else "disabled")
+        custom_enabled = enabled and self.split_direction_var.get() == "Custom"
+        custom_state = "normal" if custom_enabled else "disabled"
+        self.split_direction_custom_label.configure(state=custom_state)
+        self.split_direction_custom_entry.configure(state=custom_state)
 
     def _update_outline_mode_state(self) -> None:
         input_text = self.parent_var.get().strip()
-        is_kmz = False
+        is_vector_file = False
         if input_text:
             input_path = self._path_from_text(input_text)
-            is_kmz = input_path.suffix.lower() == ".kmz"
-        state = "disabled" if is_kmz else "readonly"
+            is_vector_file = self._is_vector_file_path(input_path)
+        state = "disabled" if is_vector_file else "readonly"
         self.outline_mode_combo.configure(state=state)
-        self.outline_mode_label.configure(state="disabled" if is_kmz else "normal")
+        self.outline_mode_label.configure(state="disabled" if is_vector_file else "normal")
 
     def _current_section_count_for_state(self) -> int:
         try:
@@ -618,6 +628,7 @@ class BoundaryKmzApp:
                 overlap_ft,
                 shape_label,
                 outline_mode,
+                split_direction_deg,
                 _,
             ) = (
                 self._read_inputs(require_output=False)
@@ -636,6 +647,7 @@ class BoundaryKmzApp:
                 overlap_ft,
                 shape_label,
                 outline_mode,
+                split_direction_deg,
             ),
             daemon=True,
         )
@@ -650,6 +662,7 @@ class BoundaryKmzApp:
                 overlap_ft,
                 shape_label,
                 outline_mode,
+                split_direction_deg,
                 output_path,
             ) = self._read_inputs(require_output=True)
         except BoundaryError as error:
@@ -671,6 +684,7 @@ class BoundaryKmzApp:
             overlap_ft,
             shape_label,
             outline_mode,
+            split_direction_deg,
         )
         cached_result = (
             self._cached_result if self._cached_settings == settings else None
@@ -686,6 +700,7 @@ class BoundaryKmzApp:
                 overlap_ft,
                 shape_label,
                 outline_mode,
+                split_direction_deg,
                 output_path,
                 cached_result,
             ),
@@ -701,6 +716,7 @@ class BoundaryKmzApp:
         overlap_ft: float,
         shape_label: str,
         outline_mode: str,
+        split_direction_deg: float | None,
     ) -> None:
         try:
             result = generate_boundary_from_input(
@@ -710,6 +726,7 @@ class BoundaryKmzApp:
                 overlap_ft=overlap_ft,
                 shape_label=shape_label,
                 outline_mode=outline_mode,
+                split_direction_deg=split_direction_deg,
             )
         except Exception as error:
             self._queue.put(("error", error))
@@ -724,6 +741,7 @@ class BoundaryKmzApp:
         overlap_ft: float,
         shape_label: str,
         outline_mode: str,
+        split_direction_deg: float | None,
         output_path: Path,
         cached_result: BoundaryResult | None,
     ) -> None:
@@ -735,6 +753,7 @@ class BoundaryKmzApp:
                 overlap_ft=overlap_ft,
                 shape_label=shape_label,
                 outline_mode=outline_mode,
+                split_direction_deg=split_direction_deg,
             )
             saved_path = save_kmz(result, output_path)
         except Exception as error:
@@ -760,6 +779,7 @@ class BoundaryKmzApp:
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
                     result.metadata.outline_mode,
+                    result.metadata.requested_split_direction_deg,
                 )
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
@@ -776,6 +796,7 @@ class BoundaryKmzApp:
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
                     result.metadata.outline_mode,
+                    result.metadata.requested_split_direction_deg,
                 )
                 self._write_status(
                     format_summary(result.metadata)
@@ -858,19 +879,19 @@ class BoundaryKmzApp:
     def _read_inputs(
         self,
         require_output: bool,
-    ) -> tuple[Path, float, int, float, str, str, Path | None]:
+    ) -> tuple[Path, float, int, float, str, str, float | None, Path | None]:
         input_text = self.parent_var.get().strip()
         if not input_text:
-            raise BoundaryError("Choose a JPG folder or an existing KMZ file.")
+            raise BoundaryError("Choose a JPG folder, KML file, or KMZ file.")
 
         input_path = self._path_from_text(input_text)
         if not input_path.exists():
             raise BoundaryError(f"Input path does not exist: {input_path}")
         if not (
             input_path.is_dir()
-            or (input_path.is_file() and input_path.suffix.lower() == ".kmz")
+            or self._is_vector_file_path(input_path)
         ):
-            raise BoundaryError("Input must be a folder of JPGs or a KMZ file.")
+            raise BoundaryError("Input must be a folder of JPGs, KML file, or KMZ file.")
 
         buffer_text = self.buffer_var.get().strip()
         try:
@@ -921,6 +942,7 @@ class BoundaryKmzApp:
             if not shape_label:
                 shape_label = current_output_path.stem
                 self._refresh_shape_label_default(force=True)
+        split_direction_deg = self._selected_split_direction(section_count)
 
         if require_output:
             output_path = current_output_path
@@ -933,6 +955,7 @@ class BoundaryKmzApp:
             overlap_ft,
             shape_label,
             outline_mode,
+            split_direction_deg,
             output_path,
         )
 
@@ -949,13 +972,18 @@ class BoundaryKmzApp:
             )
         else:
             bx, by = result.base_polygon_projected.exterior.xy
+            source_label = (
+                "Buffered source LineStrings"
+                if "polyline" in result.metadata.input_type.lower()
+                else "Source polygon"
+            )
             self.axes.plot(
                 bx,
                 by,
                 color="#1f77b4",
                 linewidth=1.4,
                 linestyle=":",
-                label="Source KMZ polygon",
+                label=source_label,
             )
 
         if result.sections:
@@ -1082,12 +1110,40 @@ class BoundaryKmzApp:
         self._invalidate_cache()
 
     def _selected_outline_mode(self, input_path: Path) -> str:
-        if input_path.is_file() and input_path.suffix.lower() == ".kmz":
+        if self._is_vector_file_path(input_path):
             return OUTLINE_MODE_SOURCE_POLYGON
         label = self.outline_mode_var.get().strip() or "Auto"
         if label not in OUTLINE_MODE_LABELS:
             raise BoundaryError("Choose a valid outline mode.")
         return OUTLINE_MODE_LABELS[label]
+
+    @staticmethod
+    def _is_vector_file_path(path: Path) -> bool:
+        return Path(path).is_file() and Path(path).suffix.lower() in {".kml", ".kmz"}
+
+    def _selected_split_direction(self, section_count: int) -> float | None:
+        if section_count <= 1:
+            return None
+        label = self.split_direction_var.get().strip() or "Auto"
+        if label == "Auto":
+            return None
+        if label == "0 deg / East-West":
+            return 0.0
+        if label == "90 deg / North-South":
+            return 90.0
+        if label != "Custom":
+            raise BoundaryError("Choose a valid split direction.")
+
+        value_text = self.split_direction_degrees_var.get().strip()
+        if not value_text:
+            raise BoundaryError("Enter a custom split direction in degrees.")
+        try:
+            value = float(value_text)
+        except ValueError as exc:
+            raise BoundaryError("Custom split direction must be a number of degrees.") from exc
+        if not math.isfinite(value):
+            raise BoundaryError("Custom split direction must be finite.")
+        return value % 180.0
 
     @staticmethod
     def _ready_status(result: BoundaryResult, base_status: str) -> str:
@@ -1141,7 +1197,8 @@ class BoundaryKmzApp:
         overlap_ft: float,
         shape_label: str,
         outline_mode: str,
-    ) -> tuple[str, float, int, float, str, str]:
+        split_direction_deg: float | None,
+    ) -> tuple[str, float, int, float, str, str, str]:
         return (
             str(Path(input_path).resolve()).lower(),
             float(buffer_ft),
@@ -1149,6 +1206,7 @@ class BoundaryKmzApp:
             float(overlap_ft),
             shape_label.strip(),
             outline_mode,
+            "auto" if split_direction_deg is None else f"{float(split_direction_deg) % 180.0:.6f}",
         )
 
     @staticmethod

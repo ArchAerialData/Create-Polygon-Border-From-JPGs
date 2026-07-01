@@ -1,9 +1,10 @@
 # JPG Boundary to KMZ GUI
 
-This local Python app accepts either a parent folder of geotagged JPG/JPEG
-photos or an existing single-polygon KMZ. It builds or reads one generalized
-outline, applies a buffer in feet, optionally splits the result into connected
-overlapping sections, previews the result, and exports a KMZ polygon set.
+This local Python app accepts a parent folder of geotagged JPG/JPEG photos,
+a KML/KMZ file containing source LineStrings, or a single-polygon KML/KMZ.
+It builds or reads one generalized exterior-only outline, applies a buffer in
+feet, optionally splits the result into connected overlapping sections,
+previews the result, and exports a KMZ polygon set.
 
 ## Run
 
@@ -32,15 +33,18 @@ relative to its own location.
 
 In the app:
 
-1. Choose the parent folder that contains the flight folders, or choose an
-   existing single-polygon KMZ.
-   You can also drag and drop that input folder or KMZ onto the drop field.
-2. Enter a buffer distance in feet. Use `0` for no added buffer.
+1. Choose the parent folder that contains the flight folders, or choose a KML
+   or KMZ vector input.
+   You can also drag and drop that input folder, KML, or KMZ onto the drop
+   field.
+2. Enter a buffer distance in feet. Use `0` for no added buffer on JPG folder
+   and polygon KML/KMZ inputs. LineString KML/KMZ inputs require a buffer
+   greater than `0`.
 3. Choose an outline mode for JPG folders. `Auto` is the default.
 4. Use the default output file name, enter a custom file name, or choose a
    different `.kmz` path.
 5. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
-6. For multiple shapes, set overlap feet and shape label.
+6. For multiple shapes, set overlap feet, shape label, and split direction.
 7. Click `Scan / Preview`.
 8. Click `Export KMZ`.
 9. Click `View Output Folder` in the completion popup or main window to open
@@ -56,10 +60,17 @@ In the app:
   hull when confidence or geometry guardrails are not met.
 - Manual JPG outline modes are `Concave hull`, `Route-aware`, and `Lawnmower
   outer envelope`.
-- Existing KMZ input must contain exactly one polygon with an outer boundary
-  ring. KMZ files with multiple polygons or polygon holes are rejected because
-  splitting starts from a single parent outline.
-- Existing KMZ input bypasses JPG outline modes and uses source-polygon mode.
+- KML/KMZ files containing `LineString` geometry use that linework as the
+  source geometry and buffer it directly in a projected CRS.
+- If a KML/KMZ contains both `LineString` and `Polygon` geometry, the
+  LineStrings are used and polygons are ignored with a details note.
+- LineString KML/KMZ inputs require a buffer greater than `0 ft`.
+- Single-polygon KML and KMZ inputs are accepted.
+- Polygon holes and buffer-created interior rings are filled before preview,
+  sectioning, and export. Outputs are exterior-only.
+- KML/KMZ vector input bypasses JPG outline modes and uses source-vector mode.
+- Export remains KMZ even when the input is KML.
+- Source linework is not preserved in exported KMZs.
 - Pasted and dropped paths may be quoted; `file://` paths are normalized when
   the operating system supplies them.
 - If `tkinterdnd2` is installed, the input can be set by dragging and dropping
@@ -80,14 +91,20 @@ In the app:
   geometry cleanup, and projected segment densification before export.
 - Details report preflight pattern, camera order source, selected strategy,
   confidence, candidate summary, and any non-blocking Auto fallback reason.
-- When `# of Shapes` is greater than `1`, the app recursively splits the
-  buffered outline into connected equal-area sections.
-- Section overlap is clipped inside the parent outline. A `50 ft` overlap means
-  adjacent sections overlap by roughly 50 ft along shared cut areas.
+- When `# of Shapes` is greater than `1`, the app splits the buffered outline
+  into connected same-direction sections intended to look natural as
+  orthomosaic crops.
+- Split direction can be `Auto`, `0 deg / East-West`, `90 deg / North-South`,
+  or a custom degree value. `Auto` uses source-line orientation when available
+  and otherwise uses the parent polygon orientation.
+- Section overlap is clipped inside the parent outline and applied along shared
+  split boundaries. A `50 ft` overlap means adjacent sections overlap by
+  roughly 50 ft along shared cut areas.
+- Natural section base areas must stay within 20 percent of the average base
+  section area. If the app cannot create clean connected sections, it fails
+  before export instead of writing irregular crop shapes.
 - Multiple-section KMZs contain one folder named from the output KMZ filename
   stem and one polygon placemark per section, such as `Example (1 of 3)`.
-- If the app cannot create connected sections for the requested count, it fails
-  before export instead of writing disconnected MultiPolygon placemarks.
 - The preview is schematic only: it plots camera points and the exported
   boundary without an imagery basemap.
 - Full scan/export details are hidden by default so the preview can use the
