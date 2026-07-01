@@ -14,10 +14,19 @@ Resolved decision worksheet:
 docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-open-questions.md
 ```
 
+Execution runbook:
+
+```text
+docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-implementation-orchestrator.md
+```
+
+If the execution runbook conflicts with this implementation plan, this implementation plan wins.
+
 Current repository status notes observed during planning:
 
 - Branch: `Testing-New-Methods...origin/Testing-New-Methods`.
 - `outputs/` currently has unrelated deleted KMZ files in the worktree. This plan must not restore, delete, or otherwise touch those files unless the user explicitly asks.
+- `src/jpg_boundary_kmz_gui.py` currently has a pre-existing preview legend placement fix from a separate request. Do not revert it; if this file remains dirty at implementation start, record it as pre-existing and preserve it until the GUI phase can work with it.
 - `test_data/` remains read-only calibration data and must stay ignored.
 - `C:\Users\rbake\Desktop\VS Code Shortcuts\Buffer-Zone-Generator` is a reference source only. Do not modify it.
 
@@ -76,9 +85,12 @@ This section controls implementation. If later wording is less strict, this sect
 
 - Phases must be implemented in order.
 - Do not begin a downstream phase until every command and pass/fail criterion in the current phase passes.
+- Passing phase gates are agent-verifiable and do not require human approval unless a human-blocking condition in this plan or the orchestrator is triggered.
+- If the user requests implementation to continue, the agent should proceed from one passing phase/run to the next without stopping for approval, while still reporting each run summary.
+- Manual validation in this plan is agent-performed validation unless a human-blocking condition is triggered.
 - If a phase fails, patch within that phase's allow-list or revise this plan before touching additional files.
 - After each phase, run `git status --short` and `git diff --name-only`.
-- After each phase, confirm only files allowed for that phase changed, aside from pre-existing unrelated `outputs/` deletions.
+- After each phase, confirm only files allowed for that phase changed, aside from documented pre-existing unrelated `outputs/` deletions and the documented pre-existing preview legend GUI fix if it is still present.
 - After each phase, confirm `test_data/`, `outputs/`, source sample folders, `__pycache__/`, `.pyc` files, launcher files, `agent_prompt_templates/`, and Buffer-Zone-Generator were not modified by the implementation.
 - Any implementation that silently drops existing JPG functionality fails the gate.
 - Any implementation that regresses existing valid single-polygon KMZ behavior fails the gate.
@@ -423,6 +435,7 @@ tests\test_polyline_boundary.py
 README_JPG_BOUNDARY_KMZ.md
 docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-implementation-plan.md
 docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-open-questions.md
+docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-implementation-orchestrator.md
 docs\kml-kmz-input-consolidation\kml-kmz-input-consolidation-validation-notes.md
 ```
 
@@ -719,7 +732,7 @@ Continue gate:
 
 - Open questions are answered and integrated into this plan.
 - Baseline tests pass.
-- Dirty worktree state is understood; unrelated `outputs/` deletions are not touched.
+- Dirty worktree state is understood; unrelated `outputs/` deletions and the pre-existing preview legend GUI fix are not touched outside their proper phase.
 - `test_data/` is ignored.
 - North 2 source and reference files exist and are treated as read-only.
 - Buffer-Zone-Generator source files are treated as references only.
@@ -793,6 +806,12 @@ No human review is required for:
 - Creating disposable outputs in a temp directory.
 - Updating validation notes with objective command and geometry evidence.
 
-## 14. Final Readiness Assessment
+## 14. Future Follow-Up Notes
+
+The following item is intentionally out of scope for this implementation and must not block the KML/KMZ consolidation gates:
+
+- Add preview pan/zoom inspection controls using the existing embedded Matplotlib preview, likely via `NavigationToolbar2Tk`, so users can zoom into, pan around, and reset shape previews. This should be handled as a separate follow-up after the KML/KMZ vector input and natural sectioning implementation is complete.
+
+## 15. Final Readiness Assessment
 
 This plan is implementation-ready. All decisions are resolved and integrated as fixed requirements, including KMZ-only export, LineString precedence in mixed vector files, no source-line preservation, positive-buffer enforcement for LineString inputs, disconnected-output rejection, single-polygon KML support, polygon-interior cleanup, user-facing split direction control with preview updates, shared-boundary overlap, clear natural-split failure, visual-regularity priority, and 20 percent section area tolerance.

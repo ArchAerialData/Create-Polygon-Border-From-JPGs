@@ -70,6 +70,34 @@ def densify_projected_geometry(geometry, max_segment_m: float = EXPORT_MAX_SEGME
     return clean_geometry(geometry.segmentize(max_segment_m))
 
 
+def fill_polygon_interiors(geometry):
+    """Return polygonal geometry with all interior rings removed."""
+    cleaned = clean_geometry(geometry)
+    if cleaned.is_empty:
+        return cleaned
+
+    if isinstance(cleaned, Polygon):
+        return clean_geometry(Polygon(cleaned.exterior))
+
+    if isinstance(cleaned, MultiPolygon):
+        return clean_geometry(
+            MultiPolygon(
+                [Polygon(part.exterior) for part in cleaned.geoms if not part.is_empty]
+            )
+        )
+
+    if isinstance(cleaned, GeometryCollection):
+        polygons = [
+            Polygon(part.exterior)
+            for part in cleaned.geoms
+            if isinstance(part, Polygon) and not part.is_empty and part.area > 0
+        ]
+        if polygons:
+            return clean_geometry(unary_union(polygons))
+
+    return cleaned
+
+
 def is_supported_polygonal_geometry(geometry) -> bool:
     if geometry.is_empty or not geometry.is_valid:
         return False

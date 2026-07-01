@@ -28,13 +28,17 @@ from geometry_hardening import (
     DEFAULT_BUFFER_QUAD_SEGS,
     buffer_projected_geometry,
     densify_projected_geometry,
+    fill_polygon_interiors,
 )
+from kml_vector_input import VectorInputError, VectorInputGeometry, load_vector_input
+from natural_sectioning import NaturalSplitError, build_natural_sections
 from outline_strategies import (
     OUTLINE_MODE_AUTO,
     OUTLINE_MODES,
     select_outline,
     summarize_candidates,
 )
+from polyline_boundary import PolylineBoundaryError, build_polyline_boundary
 
 
 FEET_PER_METER = 3.280839895
@@ -92,6 +96,15 @@ class BoundaryMetadata:
     strategy_confidence: float = 0.0
     fallback_reason: str = ""
     candidate_summary: str = ""
+    source_line_count: int = 0
+    source_point_count: int = 0
+    ignored_polygon_count: int = 0
+    ignored_interior_ring_count: int = 0
+    source_axis_hint_deg: float | None = None
+    requested_split_direction_deg: float | None = None
+    selected_split_direction_deg: float | None = None
+    split_area_variance_pct: float = 0.0
+    exterior_cleanup: str = ""
 
 
 @dataclass
@@ -152,6 +165,7 @@ def generate_boundary(
     concave_ratio: float = DEFAULT_CONCAVE_RATIO,
     simplify_factor: float = DEFAULT_SIMPLIFY_FACTOR,
     outline_mode: str = OUTLINE_MODE_AUTO,
+    split_direction_deg: float | None = None,
 ) -> BoundaryResult:
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
@@ -236,20 +250,25 @@ def generate_boundary(
     section_area_max_acres = 0.0
     sections_connected = True
     section_label = shape_label.strip()
+    selected_split_direction_deg: float | None = None
+    split_area_variance_pct = 0.0
 
     if section_count > 1:
         section_label = section_label or "JPG Camera Boundary"
-        sections, split_angles = _build_sections(
+        sections, split_diagnostics = _build_sections(
             final_projected,
             section_count,
             overlap_ft * METERS_PER_FOOT,
             section_label,
             to_wgs84,
+            split_direction_deg=split_direction_deg,
         )
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
-        split_strategy = _format_split_strategy(split_angles)
+        split_strategy = split_diagnostics.split_strategy
+        selected_split_direction_deg = split_diagnostics.selected_split_direction_deg
+        split_area_variance_pct = split_diagnostics.area_variance_pct
 
     metadata = BoundaryMetadata(
         source_folder=parent_folder.resolve(),
@@ -281,6 +300,9 @@ def generate_boundary(
         strategy_confidence=outline_selection.selected.confidence,
         fallback_reason=outline_selection.fallback_reason,
         candidate_summary=summarize_candidates(outline_selection.candidates),
+        requested_split_direction_deg=split_direction_deg if section_count > 1 else None,
+        selected_split_direction_deg=selected_split_direction_deg,
+        split_area_variance_pct=split_area_variance_pct,
     )
 
     return BoundaryResult(
@@ -301,6 +323,7 @@ def generate_boundary_from_input(
     overlap_ft: float = 50.0,
     shape_label: str = "",
     outline_mode: str = OUTLINE_MODE_AUTO,
+    split_direction_deg: float | None = None,
 ) -> BoundaryResult:
     input_path = Path(input_path)
     if input_path.is_dir():
@@ -311,6 +334,7 @@ def generate_boundary_from_input(
             overlap_ft=overlap_ft,
             shape_label=shape_label,
             outline_mode=outline_mode,
+            split_direction_deg=split_direction_deg,
         )
     if input_path.is_file() and input_path.suffix.lower() == ".kmz":
         return generate_boundary_from_kmz(
@@ -319,8 +343,18 @@ def generate_boundary_from_input(
             section_count=section_count,
             overlap_ft=overlap_ft,
             shape_label=shape_label,
+            split_direction_deg=split_direction_deg,
         )
-    raise BoundaryError("Choose a folder of JPGs or an existing KMZ file.")
+    if input_path.is_file() and input_path.suffix.lower() == ".kml":
+        return generate_boundary_from_vector_file(
+            input_path,
+            buffer_ft,
+            section_count=section_count,
+            overlap_ft=overlap_ft,
+            shape_label=shape_label,
+            split_direction_deg=split_direction_deg,
+        )
+    raise BoundaryError("Choose a folder of JPGs, KML file, or KMZ file.")
 
 
 def generate_boundary_from_kmz(
@@ -329,6 +363,28 @@ def generate_boundary_from_kmz(
     section_count: int = 1,
     overlap_ft: float = 50.0,
     shape_label: str = "",
+    split_direction_deg: float | None = None,
+) -> BoundaryResult:
+    kmz_path = Path(kmz_path)
+    if kmz_path.suffix.lower() != ".kmz":
+        raise BoundaryError(f"Input path is not a KMZ file: {kmz_path}")
+    return generate_boundary_from_vector_file(
+        kmz_path,
+        buffer_ft,
+        section_count=section_count,
+        overlap_ft=overlap_ft,
+        shape_label=shape_label,
+        split_direction_deg=split_direction_deg,
+    )
+
+
+def generate_boundary_from_vector_file(
+    vector_path: Path,
+    buffer_ft: float,
+    section_count: int = 1,
+    overlap_ft: float = 50.0,
+    shape_label: str = "",
+    split_direction_deg: float | None = None,
 ) -> BoundaryResult:
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
@@ -337,13 +393,43 @@ def generate_boundary_from_kmz(
     if overlap_ft < 0:
         raise BoundaryError("Overlap distance must be 0 or greater.")
 
-    kmz_path = Path(kmz_path)
-    if not kmz_path.exists():
-        raise BoundaryError(f"Input KMZ does not exist: {kmz_path}")
-    if not kmz_path.is_file() or kmz_path.suffix.lower() != ".kmz":
-        raise BoundaryError(f"Input path is not a KMZ file: {kmz_path}")
+    vector_path = Path(vector_path)
+    try:
+        vector_geometry = load_vector_input(vector_path)
+    except VectorInputError as exc:
+        raise BoundaryError(str(exc)) from exc
 
-    source_polygon_wgs84 = _read_single_polygon_from_kmz(kmz_path)
+    if vector_geometry.lines_wgs84:
+        return _generate_boundary_from_polyline_vector(
+            vector_geometry,
+            buffer_ft=buffer_ft,
+            section_count=section_count,
+            overlap_ft=overlap_ft,
+            shape_label=shape_label,
+            split_direction_deg=split_direction_deg,
+        )
+    return _generate_boundary_from_polygon_vector(
+        vector_geometry,
+        buffer_ft=buffer_ft,
+        section_count=section_count,
+        overlap_ft=overlap_ft,
+        shape_label=shape_label,
+        split_direction_deg=split_direction_deg,
+    )
+
+
+def _generate_boundary_from_polygon_vector(
+    vector_geometry: VectorInputGeometry,
+    *,
+    buffer_ft: float,
+    section_count: int,
+    overlap_ft: float,
+    shape_label: str,
+    split_direction_deg: float | None,
+) -> BoundaryResult:
+    source_polygon_wgs84 = _ensure_polygon(
+        fill_polygon_interiors(vector_geometry.polygons_wgs84[0])
+    )
     lon_values = np.array([lon for lon, _lat in source_polygon_wgs84.exterior.coords])
     lat_values = np.array([lat for _lon, lat in source_polygon_wgs84.exterior.coords])
     epsg = detect_utm_epsg(lat_values, lon_values)
@@ -355,26 +441,30 @@ def generate_boundary_from_kmz(
         lambda x, y, z=None: to_projected.transform(x, y),
         source_polygon_wgs84,
     )
-    source_projected = _ensure_polygon(source_projected)
+    source_projected = _ensure_polygon(fill_polygon_interiors(source_projected))
 
     buffer_m = buffer_ft * METERS_PER_FOOT
+    ignored_generated_interiors = 0
     if buffer_m > 0:
-        final_projected = buffer_projected_geometry(
+        buffered_projected = buffer_projected_geometry(
             source_projected,
             buffer_m,
             join_style=BUFFER_JOIN_STYLE,
             mitre_limit=BUFFER_MITRE_LIMIT,
         )
-        final_projected = _ensure_polygon(final_projected)
+        ignored_generated_interiors = _count_polygon_interiors(buffered_projected)
+        final_projected = _ensure_polygon(fill_polygon_interiors(buffered_projected))
     else:
         final_projected = source_projected
 
-    final_projected = _ensure_polygon(densify_projected_geometry(final_projected))
+    final_projected = _ensure_polygon(
+        fill_polygon_interiors(densify_projected_geometry(final_projected))
+    )
     final_wgs84 = transform_geometry(
         lambda x, y, z=None: to_wgs84.transform(x, y),
         final_projected,
     )
-    final_wgs84 = _ensure_polygon(final_wgs84)
+    final_wgs84 = _ensure_polygon(fill_polygon_interiors(final_wgs84))
     projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
     sections: list[BoundarySection] = []
@@ -382,23 +472,31 @@ def generate_boundary_from_kmz(
     section_area_min_acres = 0.0
     section_area_max_acres = 0.0
     section_label = shape_label.strip()
+    selected_split_direction_deg: float | None = None
+    split_area_variance_pct = 0.0
     if section_count > 1:
-        section_label = section_label or kmz_path.stem
-        sections, split_angles = _build_sections(
+        section_label = section_label or vector_geometry.source_path.stem
+        sections, split_diagnostics = _build_sections(
             final_projected,
             section_count,
             overlap_ft * METERS_PER_FOOT,
             section_label,
             to_wgs84,
+            split_direction_deg=split_direction_deg,
         )
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
-        split_strategy = _format_split_strategy(split_angles)
+        split_strategy = split_diagnostics.split_strategy
+        selected_split_direction_deg = split_diagnostics.selected_split_direction_deg
+        split_area_variance_pct = split_diagnostics.area_variance_pct
 
+    ignored_interior_count = (
+        vector_geometry.ignored_interior_ring_count + ignored_generated_interiors
+    )
     metadata = BoundaryMetadata(
-        source_folder=kmz_path.resolve(),
-        input_type="KMZ polygon",
+        source_folder=vector_geometry.source_path,
+        input_type=_input_type_label(vector_geometry.input_kind),
         jpg_count=0,
         gps_count=0,
         skipped_count=0,
@@ -420,6 +518,11 @@ def generate_boundary_from_kmz(
         outline_mode="source_polygon",
         selected_strategy="source_polygon",
         strategy_confidence=1.0,
+        ignored_interior_ring_count=ignored_interior_count,
+        requested_split_direction_deg=split_direction_deg if section_count > 1 else None,
+        selected_split_direction_deg=selected_split_direction_deg,
+        split_area_variance_pct=split_area_variance_pct,
+        exterior_cleanup=_format_exterior_cleanup(ignored_interior_count),
     )
 
     return BoundaryResult(
@@ -427,6 +530,102 @@ def generate_boundary_from_kmz(
         gps_points=[],
         projected_points=projected_points,
         base_polygon_projected=source_projected,
+        final_polygon_projected=final_projected,
+        final_polygon_wgs84=final_wgs84,
+        sections=sections,
+    )
+
+
+def _generate_boundary_from_polyline_vector(
+    vector_geometry: VectorInputGeometry,
+    *,
+    buffer_ft: float,
+    section_count: int,
+    overlap_ft: float,
+    shape_label: str,
+    split_direction_deg: float | None,
+) -> BoundaryResult:
+    try:
+        line_boundary = build_polyline_boundary(vector_geometry.lines_wgs84, buffer_ft)
+    except PolylineBoundaryError as exc:
+        raise BoundaryError(str(exc)) from exc
+
+    final_projected = line_boundary.final_polygon_projected
+    final_wgs84 = line_boundary.final_polygon_wgs84
+    projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
+
+    sections: list[BoundarySection] = []
+    split_strategy = "Single polygon"
+    section_area_min_acres = 0.0
+    section_area_max_acres = 0.0
+    section_label = shape_label.strip()
+    selected_split_direction_deg: float | None = None
+    split_area_variance_pct = 0.0
+    if section_count > 1:
+        section_label = section_label or vector_geometry.source_path.stem
+        sections, split_diagnostics = _build_sections(
+            final_projected,
+            section_count,
+            overlap_ft * METERS_PER_FOOT,
+            section_label,
+            Transformer.from_crs(
+                CRS.from_epsg(line_boundary.epsg),
+                4326,
+                always_xy=True,
+            ),
+            split_direction_deg=split_direction_deg,
+            axis_hint_deg=line_boundary.source_axis_hint_deg,
+        )
+        base_areas = [section.base_area_acres for section in sections]
+        section_area_min_acres = min(base_areas)
+        section_area_max_acres = max(base_areas)
+        split_strategy = split_diagnostics.split_strategy
+        selected_split_direction_deg = split_diagnostics.selected_split_direction_deg
+        split_area_variance_pct = split_diagnostics.area_variance_pct
+
+    ignored_interior_count = int(
+        line_boundary.diagnostics.get("ignored_interior_ring_count", 0)
+    )
+    metadata = BoundaryMetadata(
+        source_folder=vector_geometry.source_path,
+        input_type=_input_type_label(vector_geometry.input_kind),
+        jpg_count=0,
+        gps_count=0,
+        skipped_count=0,
+        epsg=line_boundary.epsg,
+        crs_name=line_boundary.crs_name,
+        buffer_ft=buffer_ft,
+        median_spacing_ft=0.0,
+        smoothing_ft=0.0,
+        containment_padding_ft=0.0,
+        concave_ratio=0.0,
+        vertex_count=len(final_wgs84.exterior.coords),
+        section_count=section_count,
+        overlap_ft=overlap_ft if section_count > 1 else 0.0,
+        shape_label=section_label if section_count > 1 else "",
+        split_strategy=split_strategy,
+        section_area_min_acres=section_area_min_acres,
+        section_area_max_acres=section_area_max_acres,
+        sections_connected=True,
+        outline_mode="source_linework",
+        selected_strategy="source_linework_buffer",
+        strategy_confidence=1.0,
+        source_line_count=line_boundary.source_line_count,
+        source_point_count=line_boundary.source_point_count,
+        ignored_polygon_count=vector_geometry.ignored_polygon_count,
+        ignored_interior_ring_count=ignored_interior_count,
+        source_axis_hint_deg=line_boundary.source_axis_hint_deg,
+        requested_split_direction_deg=split_direction_deg if section_count > 1 else None,
+        selected_split_direction_deg=selected_split_direction_deg,
+        split_area_variance_pct=split_area_variance_pct,
+        exterior_cleanup=_format_exterior_cleanup(ignored_interior_count),
+    )
+
+    return BoundaryResult(
+        metadata=metadata,
+        gps_points=[],
+        projected_points=projected_points,
+        base_polygon_projected=line_boundary.base_polygon_projected,
         final_polygon_projected=final_projected,
         final_polygon_wgs84=final_wgs84,
         sections=sections,
@@ -506,7 +705,30 @@ def format_summary(metadata: BoundaryMetadata) -> str:
         if metadata.candidate_summary:
             lines.append(f"Candidate summary: {metadata.candidate_summary}")
     else:
-        lines.append("Source polygon: 1")
+        if metadata.source_line_count:
+            lines.extend(
+                [
+                    f"Source LineStrings: {metadata.source_line_count:,}",
+                    f"Source line coordinates: {metadata.source_point_count:,}",
+                ]
+            )
+            if metadata.source_axis_hint_deg is not None:
+                lines.append(
+                    f"Source line orientation hint: {metadata.source_axis_hint_deg:.1f} deg"
+                )
+            if metadata.ignored_polygon_count:
+                lines.append(
+                    "Using source LineStrings; polygons ignored: "
+                    f"{metadata.ignored_polygon_count:,}"
+                )
+        else:
+            lines.append("Source polygon: 1")
+        if metadata.ignored_interior_ring_count:
+            lines.append(
+                f"Interior rings ignored/filled: {metadata.ignored_interior_ring_count:,}"
+            )
+        if metadata.exterior_cleanup:
+            lines.append(f"Exterior cleanup: {metadata.exterior_cleanup}")
     lines.extend(
         [
             f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
@@ -522,6 +744,12 @@ def format_summary(metadata: BoundaryMetadata) -> str:
                 f"Shape label: {metadata.shape_label}",
                 f"Split strategy: {metadata.split_strategy}",
                 "Sections connected: Yes",
+                (
+                    "Selected split direction: Auto"
+                    if metadata.selected_split_direction_deg is None
+                    else f"Selected split direction: {metadata.selected_split_direction_deg:.1f} deg"
+                ),
+                f"Section area variance: {metadata.split_area_variance_pct:.1f}%",
                 (
                     "Base section area range: "
                     f"{metadata.section_area_min_acres:,.1f} - "
@@ -540,53 +768,35 @@ def _build_sections(
     overlap_m: float,
     shape_label: str,
     to_wgs84: Transformer,
-) -> tuple[list[BoundarySection], list[float]]:
-    base_parts, split_angles = _partition_connected_polygon(
-        parent_polygon,
-        section_count,
-    )
-    sorted_parts = sorted(
-        base_parts,
-        key=lambda polygon: (polygon.centroid.x, -polygon.centroid.y),
-    )
-
-    sections: list[BoundarySection] = []
-    half_overlap_m = overlap_m / 2.0
-    for index, base_part in enumerate(sorted_parts, start=1):
-        output_part = base_part
-        if half_overlap_m > 0:
-            output_part = buffer_projected_geometry(
-                base_part,
-                half_overlap_m,
-                join_style=BUFFER_JOIN_STYLE,
-                mitre_limit=BUFFER_MITRE_LIMIT,
-            ).intersection(parent_polygon)
-
-        output_part = _strict_single_polygon(output_part)
-        if output_part is None:
-            raise BoundaryError(
-                "Could not create connected overlapped sections. "
-                "Try fewer shapes or a smaller overlap distance."
-            )
-
-        output_part = _ensure_polygon(densify_projected_geometry(output_part))
-        polygon_wgs84 = transform_geometry(
-            lambda x, y, z=None: to_wgs84.transform(x, y),
-            output_part,
+    *,
+    split_direction_deg: float | None = None,
+    axis_hint_deg: float | None = None,
+):
+    try:
+        natural_sections, diagnostics = build_natural_sections(
+            parent_polygon,
+            section_count,
+            overlap_m,
+            shape_label,
+            to_wgs84,
+            split_direction_deg=split_direction_deg,
+            axis_hint_deg=axis_hint_deg,
         )
-        polygon_wgs84 = _ensure_polygon(polygon_wgs84)
-        sections.append(
-            BoundarySection(
-                index=index,
-                total=section_count,
-                display_name=f"{shape_label} ({index} of {section_count})",
-                base_area_acres=base_part.area * ACRES_PER_SQUARE_METER,
-                polygon_projected=output_part,
-                polygon_wgs84=polygon_wgs84,
-            )
-        )
+    except NaturalSplitError as exc:
+        raise BoundaryError(str(exc)) from exc
 
-    return sections, split_angles
+    sections = [
+        BoundarySection(
+            index=section.index,
+            total=section.total,
+            display_name=section.display_name,
+            base_area_acres=section.base_area_acres,
+            polygon_projected=section.polygon_projected,
+            polygon_wgs84=section.polygon_wgs84,
+        )
+        for section in natural_sections
+    ]
+    return sections, diagnostics
 
 
 def _partition_connected_polygon(
@@ -756,6 +966,32 @@ def _style_polygon(polygon, color_index: int) -> None:
     polygon.style.polystyle.color = simplekml.Color.rgb(red, green, blue, 45)
     polygon.style.polystyle.fill = 1
     polygon.style.polystyle.outline = 1
+
+
+def _input_type_label(input_kind: str) -> str:
+    labels = {
+        "polyline_kml": "KML polyline",
+        "polyline_kmz": "KMZ polyline",
+        "polygon_kml": "KML polygon",
+        "polygon_kmz": "KMZ polygon",
+    }
+    return labels.get(input_kind, input_kind)
+
+
+def _format_exterior_cleanup(ignored_interior_count: int) -> str:
+    if ignored_interior_count:
+        return "Interior rings filled; exterior boundary only."
+    return "Exterior boundary only."
+
+
+def _count_polygon_interiors(geometry) -> int:
+    if isinstance(geometry, Polygon):
+        return len(geometry.interiors)
+    if isinstance(geometry, MultiPolygon):
+        return sum(len(part.interiors) for part in geometry.geoms)
+    if isinstance(geometry, GeometryCollection):
+        return sum(_count_polygon_interiors(part) for part in geometry.geoms)
+    return 0
 
 
 def _read_single_polygon_from_kmz(kmz_path: Path) -> Polygon:
@@ -1057,7 +1293,30 @@ def _build_kml_description(
         if metadata.candidate_summary:
             lines.append(f"Candidate summary: {metadata.candidate_summary}")
     else:
-        lines.append("Source polygon: 1")
+        if metadata.source_line_count:
+            lines.extend(
+                [
+                    f"Source LineStrings: {metadata.source_line_count:,}",
+                    f"Source line coordinates: {metadata.source_point_count:,}",
+                ]
+            )
+            if metadata.source_axis_hint_deg is not None:
+                lines.append(
+                    f"Source line orientation hint: {metadata.source_axis_hint_deg:.1f} deg"
+                )
+            if metadata.ignored_polygon_count:
+                lines.append(
+                    "Using source LineStrings; polygons ignored: "
+                    f"{metadata.ignored_polygon_count:,}"
+                )
+        else:
+            lines.append("Source polygon: 1")
+        if metadata.ignored_interior_ring_count:
+            lines.append(
+                f"Interior rings ignored/filled: {metadata.ignored_interior_ring_count:,}"
+            )
+        if metadata.exterior_cleanup:
+            lines.append(f"Exterior cleanup: {metadata.exterior_cleanup}")
     if metadata.section_count > 1:
         lines.extend(
             [
@@ -1066,6 +1325,12 @@ def _build_kml_description(
                 f"Shape label: {metadata.shape_label}",
                 f"Split strategy: {metadata.split_strategy}",
                 f"Sections connected: {'Yes' if metadata.sections_connected else 'No'}",
+                (
+                    "Selected split direction: Auto"
+                    if metadata.selected_split_direction_deg is None
+                    else f"Selected split direction: {metadata.selected_split_direction_deg:.1f} deg"
+                ),
+                f"Section area variance: {metadata.split_area_variance_pct:.1f}%",
                 (
                     "Base section area range: "
                     f"{metadata.section_area_min_acres:,.1f} - "

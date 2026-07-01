@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import math
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
@@ -45,6 +46,12 @@ OUTLINE_MODE_LABELS = {
     "Lawnmower outer envelope": OUTLINE_MODE_LAWNMOWER,
 }
 OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
+SPLIT_DIRECTION_OPTIONS = (
+    "Auto",
+    "0 deg / East-West",
+    "90 deg / North-South",
+    "Custom",
+)
 
 
 class BoundaryKmzApp:
@@ -62,7 +69,9 @@ class BoundaryKmzApp:
         self.section_count_var = tk.StringVar(value="1")
         self.overlap_var = tk.StringVar(value="50")
         self.shape_label_var = tk.StringVar(value=self._default_shape_label())
-        self.status_var = tk.StringVar(value="Choose a JPG folder or KMZ file to begin.")
+        self.split_direction_var = tk.StringVar(value="Auto")
+        self.split_direction_degrees_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
         self._updating_output_fields = False
         self._updating_shape_label = False
         self._shape_label_touched = False
@@ -70,7 +79,7 @@ class BoundaryKmzApp:
 
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cached_result: BoundaryResult | None = None
-        self._cached_settings: tuple[str, float, int, float, str, str] | None = None
+        self._cached_settings: tuple[str, float, int, float, str, str, str] | None = None
         self._busy = False
 
         self._build_ui()
@@ -81,6 +90,8 @@ class BoundaryKmzApp:
         self.section_count_var.trace_add("write", self._on_section_options_changed)
         self.overlap_var.trace_add("write", self._on_section_options_changed)
         self.shape_label_var.trace_add("write", self._on_shape_label_changed)
+        self.split_direction_var.trace_add("write", self._on_split_direction_changed)
+        self.split_direction_degrees_var.trace_add("write", self._on_split_direction_changed)
         self._update_outline_mode_state()
         self._update_section_control_state()
         self.root.after(100, self._drain_queue)
@@ -94,7 +105,7 @@ class BoundaryKmzApp:
         root_frame.columnconfigure(1, weight=1)
         root_frame.rowconfigure(8, weight=1)
 
-        ttk.Label(root_frame, text="Input folder or KMZ").grid(
+        ttk.Label(root_frame, text="Input folder, KML, or KMZ").grid(
             row=0,
             column=0,
             sticky="w",
@@ -124,7 +135,7 @@ class BoundaryKmzApp:
         ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(
             input_buttons,
-            text="Browse KMZ...",
+            text="Browse KML/KMZ...",
             command=self._browse_kmz,
         ).grid(row=0, column=1, sticky="ew")
 
@@ -269,14 +280,48 @@ class BoundaryKmzApp:
             pady=8,
         )
 
+        self.split_direction_label = ttk.Label(sections_frame, text="Split direction")
+        self.split_direction_label.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(8, 6),
+            pady=(0, 8),
+        )
+        self.split_direction_combo = ttk.Combobox(
+            sections_frame,
+            textvariable=self.split_direction_var,
+            values=SPLIT_DIRECTION_OPTIONS,
+            state="readonly",
+            width=20,
+        )
+        self.split_direction_combo.grid(row=1, column=1, sticky="w", pady=(0, 8))
+        self.split_direction_custom_label = ttk.Label(
+            sections_frame,
+            text="Degrees",
+        )
+        self.split_direction_custom_label.grid(
+            row=1,
+            column=2,
+            sticky="w",
+            padx=(16, 6),
+            pady=(0, 8),
+        )
+        self.split_direction_custom_entry = ttk.Entry(
+            sections_frame,
+            textvariable=self.split_direction_degrees_var,
+            width=10,
+        )
+        self.split_direction_custom_entry.grid(row=1, column=3, sticky="w", pady=(0, 8))
+
         drop_frame = ttk.LabelFrame(root_frame, text="Drag and drop")
         drop_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         drop_frame.columnconfigure(0, weight=1)
 
         drop_text = (
-            "Drop an input folder or single-polygon KMZ here"
+            "Drop an input folder, KML, or KMZ here"
             if DND_FILES is not None
-            else "Drag-and-drop is unavailable; use Browse Folder or Browse KMZ..."
+            else "Drag-and-drop is unavailable; use Browse Folder or Browse KML/KMZ..."
         )
         self.drop_label = tk.Label(
             drop_frame,
@@ -363,12 +408,12 @@ class BoundaryKmzApp:
         inputs = [
             path
             for path in paths
-            if path.is_dir() or (path.is_file() and path.suffix.lower() == ".kmz")
+            if path.is_dir() or self._is_vector_file_path(path)
         ]
         if not inputs:
             messagebox.showerror(
                 "Invalid drop",
-                "Drop a folder that contains JPGs or a single-polygon KMZ file.",
+                "Drop a folder that contains JPGs, a KML file, or a KMZ file.",
             )
             return
 
@@ -395,8 +440,13 @@ class BoundaryKmzApp:
         else:
             initial_dir = str(Path.cwd())
         kmz_path = filedialog.askopenfilename(
-            title="Choose existing single-polygon KMZ",
-            filetypes=[("KMZ files", "*.kmz"), ("All files", "*.*")],
+            title="Choose KML or KMZ vector input",
+            filetypes=[
+                ("KML/KMZ files", "*.kml *.kmz"),
+                ("KML files", "*.kml"),
+                ("KMZ files", "*.kmz"),
+                ("All files", "*.*"),
+            ],
             initialdir=initial_dir,
         )
         if not kmz_path:
@@ -950,10 +1000,15 @@ class BoundaryKmzApp:
         self.axes.set_title("Camera Positions and Export Boundary")
         self.axes.set_xlabel("Projected X (meters)")
         self.axes.set_ylabel("Projected Y (meters)")
-        legend_columns = 2 if len(result.sections) > 8 else 1
-        self.axes.legend(loc="upper right", fontsize="small", ncol=legend_columns)
+        self.axes.legend(
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize="small",
+            ncol=1,
+            borderaxespad=0.0,
+        )
         self.axes.grid(True, linewidth=0.3, alpha=0.35)
-        self.figure.tight_layout()
+        self.figure.tight_layout(rect=(0.0, 0.0, 0.72, 1.0))
         self.canvas.draw_idle()
 
     def _draw_empty_preview(self) -> None:
@@ -962,6 +1017,7 @@ class BoundaryKmzApp:
         self.axes.set_xlabel("Projected X (meters)")
         self.axes.set_ylabel("Projected Y (meters)")
         self.axes.grid(True, linewidth=0.3, alpha=0.35)
+        self.figure.tight_layout()
 
     def _write_status(self, text: str) -> None:
         self._details_text = text

@@ -18,7 +18,9 @@ if str(SRC) not in sys.path:
 
 from jpg_boundary_kmz_core import (  # noqa: E402
     BoundaryError,
+    format_summary,
     generate_boundary,
+    generate_boundary_from_input,
     generate_boundary_from_kmz,
     _strict_single_polygon,
 )
@@ -35,6 +37,70 @@ class CoreRegressionTests(TestCase):
 
             self.assertEqual(result.metadata.input_type, "KMZ polygon")
             self.assertTrue(result.final_polygon_projected.is_valid)
+
+    def test_kml_polyline_input_routes_to_linework_buffer(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "source_lines.kml"
+            _write_text_kml(kml_path, _line_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=100.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertEqual(result.metadata.source_line_count, 1)
+            self.assertGreater(result.metadata.source_point_count, 1)
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_kmz_polyline_input_routes_to_linework_buffer(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kmz_path = Path(tmp) / "source_lines.kmz"
+            _write_test_kmz(kmz_path, body=_line_kml_body())
+
+            result = generate_boundary_from_input(kmz_path, buffer_ft=100.0)
+
+            self.assertEqual(result.metadata.input_type, "KMZ polyline")
+            self.assertEqual(result.metadata.source_line_count, 1)
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_linestring_input_requires_positive_buffer(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "source_lines.kml"
+            _write_text_kml(kml_path, _line_kml_body())
+
+            with self.assertRaisesRegex(BoundaryError, "greater than 0 ft"):
+                generate_boundary_from_input(kml_path, buffer_ft=0.0)
+
+    def test_mixed_vector_input_uses_lines_and_reports_ignored_polygon(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "mixed.kml"
+            _write_text_kml(kml_path, _line_kml_body() + _polygon_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=100.0)
+            summary = format_summary(result.metadata)
+
+            self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertEqual(result.metadata.ignored_polygon_count, 1)
+            self.assertIn("Using source LineStrings; polygons ignored", summary)
+
+    def test_single_polygon_kml_input_works(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "source_polygon.kml"
+            _write_text_kml(kml_path, _polygon_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=0.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polygon")
+            self.assertTrue(result.final_polygon_projected.is_valid)
+
+    def test_holed_polygon_kml_input_is_exterior_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "holed_polygon.kml"
+            _write_text_kml(kml_path, _polygon_kml_body(hole=True))
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=0.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polygon")
+            self.assertEqual(result.metadata.ignored_interior_ring_count, 1)
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
 
     def test_existing_concave_mode_still_generates_polygon(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -102,10 +168,49 @@ def _synthetic_jpg_inputs(folder: Path):
     return jpgs, gps_points
 
 
-def _write_test_kmz(path: Path) -> None:
-    kml = """<?xml version="1.0" encoding="UTF-8"?>
+def _write_test_kmz(path: Path, body: str | None = None) -> None:
+    kml = _kml_document(body or _polygon_kml_body())
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("doc.kml", kml)
+
+
+def _write_text_kml(path: Path, body: str) -> None:
+    path.write_text(_kml_document(body), encoding="utf-8")
+
+
+def _kml_document(body: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document>
+  <Document>{body}</Document>
+</kml>
+"""
+
+
+def _line_kml_body() -> str:
+    return """
+    <Placemark>
+      <LineString>
+        <coordinates>
+          -80.0000,35.0000,0 -79.9990,35.0005,0 -79.9980,35.0000,0
+        </coordinates>
+      </LineString>
+    </Placemark>
+"""
+
+
+def _polygon_kml_body(*, hole: bool = False) -> str:
+    inner = ""
+    if hole:
+        inner = """
+        <innerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -79.9998,35.0002,0 -79.9994,35.0002,0 -79.9994,35.0006,0 -79.9998,35.0002,0
+            </coordinates>
+          </LinearRing>
+        </innerBoundaryIs>
+"""
+    return f"""
     <Placemark>
       <Polygon>
         <outerBoundaryIs>
@@ -115,10 +220,7 @@ def _write_test_kmz(path: Path) -> None:
             </coordinates>
           </LinearRing>
         </outerBoundaryIs>
+        {inner}
       </Polygon>
     </Placemark>
-  </Document>
-</kml>
 """
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("doc.kml", kml)
