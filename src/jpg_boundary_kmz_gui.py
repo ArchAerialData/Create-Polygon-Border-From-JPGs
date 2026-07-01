@@ -11,7 +11,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backend_bases import MouseButton
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
 try:
@@ -46,6 +47,7 @@ OUTLINE_MODE_LABELS = {
     "Lawnmower outer envelope": OUTLINE_MODE_LAWNMOWER,
 }
 OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
+PREVIEW_SCROLL_ZOOM_FACTOR = 1.2
 SPLIT_DIRECTION_OPTIONS = (
     "Auto",
     "0 deg / East-West",
@@ -81,6 +83,13 @@ class BoundaryKmzApp:
         self._cached_result: BoundaryResult | None = None
         self._cached_settings: tuple[str, float, int, float, str, str, str] | None = None
         self._busy = False
+        self._preview_pan_start: tuple[
+            float,
+            float,
+            tuple[float, float],
+            tuple[float, float],
+        ] | None = None
+        self._preview_event_cids: list[int] = []
 
         self._build_ui()
         self.output_name_var.trace_add("write", self._on_output_name_changed)
@@ -380,6 +389,117 @@ class BoundaryKmzApp:
         self.canvas = FigureCanvasTkAgg(self.figure, master=preview_frame)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+        self.preview_toolbar = NavigationToolbar2Tk(
+            self.canvas,
+            preview_frame,
+            pack_toolbar=False,
+        )
+        self.preview_toolbar.update()
+        self.preview_toolbar.grid(row=1, column=0, sticky="ew")
+        self._register_preview_interactions()
+
+    def _register_preview_interactions(self) -> None:
+        self._preview_event_cids = [
+            self.canvas.mpl_connect("scroll_event", self._on_preview_scroll),
+            self.canvas.mpl_connect("button_press_event", self._on_preview_button_press),
+            self.canvas.mpl_connect("motion_notify_event", self._on_preview_mouse_move),
+            self.canvas.mpl_connect("button_release_event", self._on_preview_button_release),
+        ]
+
+    def _on_preview_scroll(self, event: object) -> None:
+        if not self._is_preview_axes_event(event):
+            return
+
+        direction = self._scroll_direction(event)
+        if direction == 0:
+            return
+
+        xdata = float(getattr(event, "xdata"))
+        ydata = float(getattr(event, "ydata"))
+        x_min, x_max = self.axes.get_xlim()
+        y_min, y_max = self.axes.get_ylim()
+        scale = (
+            1.0 / PREVIEW_SCROLL_ZOOM_FACTOR
+            if direction > 0
+            else PREVIEW_SCROLL_ZOOM_FACTOR
+        )
+        new_width = (x_max - x_min) * scale
+        new_height = (y_max - y_min) * scale
+        x_fraction = (xdata - x_min) / (x_max - x_min) if x_max != x_min else 0.5
+        y_fraction = (ydata - y_min) / (y_max - y_min) if y_max != y_min else 0.5
+
+        self.axes.set_xlim(
+            xdata - new_width * x_fraction,
+            xdata + new_width * (1.0 - x_fraction),
+        )
+        self.axes.set_ylim(
+            ydata - new_height * y_fraction,
+            ydata + new_height * (1.0 - y_fraction),
+        )
+        self.canvas.draw_idle()
+
+    def _on_preview_button_press(self, event: object) -> None:
+        if self._preview_toolbar_has_active_mode():
+            self._preview_pan_start = None
+            return
+        if not self._is_preview_axes_event(event):
+            self._preview_pan_start = None
+            return
+        if not self._is_left_mouse_event(event):
+            return
+
+        self._preview_pan_start = (
+            float(getattr(event, "xdata")),
+            float(getattr(event, "ydata")),
+            tuple(float(value) for value in self.axes.get_xlim()),
+            tuple(float(value) for value in self.axes.get_ylim()),
+        )
+
+    def _on_preview_mouse_move(self, event: object) -> None:
+        if self._preview_pan_start is None:
+            return
+        if self._preview_toolbar_has_active_mode():
+            self._preview_pan_start = None
+            return
+        if not self._is_preview_axes_event(event):
+            return
+
+        start_x, start_y, start_xlim, start_ylim = self._preview_pan_start
+        dx = start_x - float(getattr(event, "xdata"))
+        dy = start_y - float(getattr(event, "ydata"))
+        self.axes.set_xlim(start_xlim[0] + dx, start_xlim[1] + dx)
+        self.axes.set_ylim(start_ylim[0] + dy, start_ylim[1] + dy)
+        self.canvas.draw_idle()
+
+    def _on_preview_button_release(self, _event: object) -> None:
+        self._preview_pan_start = None
+
+    def _is_preview_axes_event(self, event: object) -> bool:
+        return (
+            getattr(event, "inaxes", None) is self.axes
+            and getattr(event, "xdata", None) is not None
+            and getattr(event, "ydata", None) is not None
+        )
+
+    def _preview_toolbar_has_active_mode(self) -> bool:
+        return bool(getattr(self.preview_toolbar, "mode", None))
+
+    @staticmethod
+    def _is_left_mouse_event(event: object) -> bool:
+        button = getattr(event, "button", None)
+        return button in {MouseButton.LEFT, 1}
+
+    @staticmethod
+    def _scroll_direction(event: object) -> int:
+        step = getattr(event, "step", None)
+        if step:
+            return 1 if step > 0 else -1
+        button = getattr(event, "button", None)
+        if button == "up":
+            return 1
+        if button == "down":
+            return -1
+        return 0
 
     def _register_drop_target(self) -> None:
         if DND_FILES is None:

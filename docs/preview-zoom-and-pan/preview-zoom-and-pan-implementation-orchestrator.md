@@ -56,7 +56,7 @@ Human review or approval is required only when at least one condition below occu
 - The GUI cannot initialize in the available environment.
 - Toolbar behavior cannot be verified from the available environment.
 - Matplotlib's built-in toolbar cannot be embedded without adding a dependency or replacing the preview architecture.
-- The implementation would require custom event handling beyond the resolved v1 toolbar decision.
+- The implementation would require custom event handling beyond the resolved direct scroll-zoom and left-drag pan behavior.
 - The implementation would alter geometry, export, simplification, sectioning, JPG generation, KML/KMZ parsing, cache-key behavior, dependencies, launcher files, or output naming.
 - The implementation would modify `test_data/`, `outputs/`, launcher files, `agent_prompt_templates/`, Buffer-Zone-Generator, source sample folders, or Metashape artifacts.
 - The implementation or validation would launch, inspect, attach to, script, interrupt, or otherwise interact with an active Metashape instance, project artifact, task queue, or processing job.
@@ -69,6 +69,8 @@ No human review is required for:
 - Passing GUI smoke verification.
 - Adding `NavigationToolbar2Tk` to the existing preview frame.
 - Adding GUI tests for toolbar existence, toolbar layout, canvas layout, and empty redraw safety.
+- Adding direct canvas event handlers for scroll zoom and left-drag pan.
+- Adding GUI tests for event registration, scroll zoom, ignored outside scroll, and left-drag pan.
 - Running disposable manual GUI validation without touching Metashape or protected folders.
 - Updating optional validation notes under `docs\preview-zoom-and-pan\`.
 
@@ -90,7 +92,7 @@ Required commands:
 ```powershell
 git status --short --branch
 git diff --name-only
-rg -n "FigureCanvasTkAgg|NavigationToolbar2Tk|def _draw_preview|def _draw_empty_preview|_settings_key" src\jpg_boundary_kmz_gui.py
+rg -n "FigureCanvasTkAgg|NavigationToolbar2Tk|mpl_connect|def _draw_preview|def _draw_empty_preview|_settings_key" src\jpg_boundary_kmz_gui.py
 rg -n "matplotlib" requirements_jpg_boundary_kmz.txt
 rg -n "class GuiInputTests|class _app" tests\test_gui_input.py
 ```
@@ -115,11 +117,11 @@ Rollback:
 
 - No code changes should exist. Revert any accidental edits and rerun the baseline commands.
 
-### Run 2: Toolbar Integration And GUI Unit Coverage
+### Run 2: Toolbar And Direct Interaction Integration
 
 Purpose:
 
-- Add Matplotlib's built-in navigation toolbar to the preview area.
+- Add Matplotlib's built-in navigation toolbar and direct canvas interactions to the preview area.
 - Keep the preview frame responsive.
 - Preserve current preview drawing, cache behavior, and legend placement.
 
@@ -127,8 +129,8 @@ Allowed files:
 
 | Path | Allowed Change |
 |---|---|
-| `src/jpg_boundary_kmz_gui.py` | Toolbar import and preview-frame layout only. |
-| `tests/test_gui_input.py` | Toolbar/canvas initialization and redraw-safety tests only. |
+| `src/jpg_boundary_kmz_gui.py` | Toolbar import, preview-frame layout, and direct preview event handlers only. |
+| `tests/test_gui_input.py` | Toolbar/canvas initialization, event registration, scroll zoom, ignored outside scroll, left-drag pan, and redraw-safety tests only. |
 | `README_JPG_BOUNDARY_KMZ.md` | Optional short usage note only. |
 
 Required implementation tasks:
@@ -136,12 +138,23 @@ Required implementation tasks:
 - Import `NavigationToolbar2Tk` next to `FigureCanvasTkAgg`.
 - Create `self.preview_toolbar` in `_build_ui`.
 - Grid canvas in the expanding row and toolbar in a non-expanding row.
+- Register `scroll_event`, `button_press_event`, `motion_notify_event`, and `button_release_event` callbacks.
+- Add direct scroll-wheel zoom centered on the cursor.
+- Add direct left-click drag pan with transient pan state.
+- Ignore events outside the preview axes.
+- Defer direct left-drag pan when an explicit toolbar mode is active so built-in
+  toolbar controls remain usable.
 - Keep `_settings_key`, worker generation, export, and geometry behavior untouched.
 - Preserve `_draw_preview` external legend placement.
 - Add tests:
   - `test_preview_toolbar_is_initialized`
   - `test_preview_canvas_and_toolbar_are_gridded`
   - `test_empty_preview_redraw_remains_safe`
+  - `test_preview_interaction_callbacks_are_registered`
+  - `test_preview_scroll_inside_axes_changes_limits`
+  - `test_preview_scroll_outside_axes_is_ignored`
+  - `test_preview_left_drag_pans_and_release_clears_state`
+  - `test_preview_left_drag_defers_to_active_toolbar_mode`
 
 Required commands:
 
@@ -158,8 +171,10 @@ Continue gate:
 - GUI tests pass.
 - GUI smoke initializes the app and destroys it cleanly.
 - Toolbar is created and attached to the preview frame.
+- Direct preview interaction callbacks are registered.
 - Canvas still exists and remains responsive.
 - `_draw_empty_preview()` remains safe.
+- Scroll zoom and left-drag pan pass GUI tests.
 - Existing preview legend remains outside plotted geometry.
 - `git status --short` and `git diff --name-only` contain only allow-listed files plus any documented pre-existing unrelated changes.
 - `test_data/`, `outputs/`, launcher files, `agent_prompt_templates/`, Buffer-Zone-Generator, and Metashape artifacts are untouched.
@@ -167,6 +182,7 @@ Continue gate:
 Stop if:
 
 - The toolbar cannot initialize in the test environment.
+- Direct interaction handlers fail targeted GUI tests.
 - The toolbar obscures the plot or breaks canvas layout.
 - Existing GUI input tests regress.
 - Non-GUI behavior changes are required.
@@ -174,8 +190,8 @@ Stop if:
 
 Rollback:
 
-- Remove toolbar import and preview toolbar creation.
-- Remove toolbar-specific GUI tests.
+- Remove toolbar import, preview toolbar creation, direct event registrations, and direct handler methods.
+- Remove toolbar/direct interaction GUI tests.
 - Preserve unrelated GUI and geometry behavior.
 
 ### Run 3: Full Validation And Manual Check
@@ -214,6 +230,8 @@ Manual validation:
 - Generate or load a preview from a safe input.
 - Confirm toolbar is visible below the preview canvas.
 - Confirm Home/Reset, Pan, and Zoom work.
+- Confirm mouse-wheel zoom works when hovering over the preview axes.
+- Confirm left-click drag pans when hovering over the preview axes.
 - Confirm a new Scan / Preview resets the full view.
 - Confirm the legend does not cover plotted shapes.
 - Do not use the toolbar Save action unless saving to a disposable temp location.
@@ -233,12 +251,12 @@ Stop if:
 
 - Full suite fails.
 - GUI smoke fails in an environment expected to support Tk.
-- Manual validation shows toolbar obscures or breaks preview.
+- Manual validation shows toolbar or direct interactions obscure or break preview.
 - Protected folders or Metashape artifacts are touched.
 
 Rollback:
 
-- Remove toolbar import and preview toolbar creation.
-- Remove toolbar-specific GUI tests.
+- Remove toolbar import, preview toolbar creation, direct event registrations, and direct handler methods.
+- Remove toolbar/direct interaction GUI tests.
 - Remove optional validation notes if they are inaccurate or no longer applicable.
 - Re-run Run 3 commands to prove previous behavior is restored.

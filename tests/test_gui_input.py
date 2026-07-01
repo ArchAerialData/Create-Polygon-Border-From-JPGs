@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +107,116 @@ class GuiInputTests(TestCase):
             app.section_count_var.set("2")
             app._update_section_control_state()
             self.assertEqual(str(app.split_direction_combo.cget("state")), "readonly")
+
+    def test_preview_toolbar_is_initialized(self) -> None:
+        with _app() as app:
+            self.assertTrue(hasattr(app, "preview_toolbar"))
+            self.assertTrue(app.preview_toolbar.winfo_exists())
+
+    def test_preview_canvas_and_toolbar_are_gridded(self) -> None:
+        with _app() as app:
+            canvas_grid = app.canvas_widget.grid_info()
+            toolbar_grid = app.preview_toolbar.grid_info()
+
+            self.assertEqual(int(canvas_grid["row"]), 0)
+            self.assertEqual(int(toolbar_grid["row"]), 1)
+            self.assertEqual(app.canvas_widget.master, app.preview_toolbar.master)
+
+    def test_empty_preview_redraw_remains_safe(self) -> None:
+        with _app() as app:
+            app._draw_empty_preview()
+            app.root.update_idletasks()
+
+    def test_preview_interaction_callbacks_are_registered(self) -> None:
+        with _app() as app:
+            self.assertEqual(len(app._preview_event_cids), 4)
+            self.assertTrue(all(isinstance(cid, int) for cid in app._preview_event_cids))
+
+    def test_preview_scroll_inside_axes_changes_limits(self) -> None:
+        with _app() as app:
+            app.axes.set_xlim(0.0, 100.0)
+            app.axes.set_ylim(0.0, 100.0)
+            before_xlim = app.axes.get_xlim()
+            before_ylim = app.axes.get_ylim()
+
+            app._on_preview_scroll(
+                SimpleNamespace(
+                    inaxes=app.axes,
+                    xdata=50.0,
+                    ydata=50.0,
+                    step=1,
+                    button="up",
+                )
+            )
+
+            after_xlim = app.axes.get_xlim()
+            after_ylim = app.axes.get_ylim()
+            self.assertLess(after_xlim[1] - after_xlim[0], before_xlim[1] - before_xlim[0])
+            self.assertLess(after_ylim[1] - after_ylim[0], before_ylim[1] - before_ylim[0])
+
+    def test_preview_scroll_outside_axes_is_ignored(self) -> None:
+        with _app() as app:
+            app.axes.set_xlim(0.0, 100.0)
+            app.axes.set_ylim(0.0, 100.0)
+            before_xlim = app.axes.get_xlim()
+            before_ylim = app.axes.get_ylim()
+
+            app._on_preview_scroll(
+                SimpleNamespace(
+                    inaxes=None,
+                    xdata=None,
+                    ydata=None,
+                    step=1,
+                    button="up",
+                )
+            )
+
+            self.assertEqual(app.axes.get_xlim(), before_xlim)
+            self.assertEqual(app.axes.get_ylim(), before_ylim)
+
+    def test_preview_left_drag_pans_and_release_clears_state(self) -> None:
+        with _app() as app:
+            app.axes.set_xlim(0.0, 100.0)
+            app.axes.set_ylim(0.0, 100.0)
+            before_xlim = app.axes.get_xlim()
+            before_ylim = app.axes.get_ylim()
+
+            app._on_preview_button_press(
+                SimpleNamespace(
+                    inaxes=app.axes,
+                    xdata=50.0,
+                    ydata=50.0,
+                    button=1,
+                )
+            )
+            app._on_preview_mouse_move(
+                SimpleNamespace(
+                    inaxes=app.axes,
+                    xdata=60.0,
+                    ydata=65.0,
+                )
+            )
+            app._on_preview_button_release(SimpleNamespace())
+
+            self.assertNotEqual(app.axes.get_xlim(), before_xlim)
+            self.assertNotEqual(app.axes.get_ylim(), before_ylim)
+            self.assertIsNone(app._preview_pan_start)
+
+    def test_preview_left_drag_defers_to_active_toolbar_mode(self) -> None:
+        with _app() as app:
+            app.preview_toolbar.zoom()
+            try:
+                app._on_preview_button_press(
+                    SimpleNamespace(
+                        inaxes=app.axes,
+                        xdata=50.0,
+                        ydata=50.0,
+                        button=1,
+                    )
+                )
+                self.assertIsNone(app._preview_pan_start)
+            finally:
+                app.preview_toolbar.zoom()
 
 
 class _app:

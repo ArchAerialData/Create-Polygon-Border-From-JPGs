@@ -21,7 +21,7 @@ Resolved answers:
 ```text
 D1: Use Matplotlib's built-in NavigationToolbar2Tk for v1.
 D2: Reset the preview view to fit on every new Scan / Preview redraw.
-D3: Do not add custom mouse-wheel zoom in v1.
+D3: Add direct mouse-wheel zoom and left-click drag pan as the first preview interaction follow-up.
 D4: Do not add persistent zoom state or new app settings in v1.
 D5: Do not change geometry, sectioning, simplification, export, or cache behavior.
 D6: Do not launch, inspect, or interact with Metashape for implementation or validation.
@@ -34,9 +34,9 @@ D6: Do not launch, inspect, or interact with Metashape for implementation or val
 | Existing preview is Matplotlib/Tk based. | Verified from code | `src/jpg_boundary_kmz_gui.py` imports and uses `FigureCanvasTkAgg`. |
 | Matplotlib is already available as a dependency. | Verified from repo | `requirements_jpg_boundary_kmz.txt` lists `matplotlib`. |
 | Existing GUI tests can instantiate the app. | Verified from tests | `tests/test_gui_input.py` uses `_create_root` and `_app`. |
-| Built-in toolbar is acceptable for v1. | Resolved product decision | Use `NavigationToolbar2Tk`; do not build custom controls. |
+| Built-in toolbar remains acceptable. | Resolved product decision | Keep `NavigationToolbar2Tk` for reset/back/forward/save fallback controls. |
 | Reset-to-fit is acceptable for each new preview. | Resolved product decision | Redraws should not preserve stale pan/zoom state. |
-| Mouse-wheel zoom and persistent viewport are out of scope. | Resolved product decision | Record as future follow-ups only. |
+| Direct mouse-wheel zoom and left-click drag pan are in scope. | Resolved product decision | Add canvas event callbacks without persistent viewport state. |
 | No geometry/export changes are needed. | Verified from scope | Feature is GUI inspection only; geometry files are excluded from allow-list. |
 | Metashape is not needed for implementation or validation. | Verified from scope | Preview is local Tk/Matplotlib UI only. |
 
@@ -76,9 +76,13 @@ Impact:
 - Adds custom event handling on top of the toolbar.
 - Better suited for a follow-up after toolbar behavior is stable.
 
-### Resolved Decision
+### Original Resolved Decision
 
 Option A. Use `NavigationToolbar2Tk` for v1.
+
+### Follow-Up Decision
+
+Keep `NavigationToolbar2Tk` visible and add direct mouse interactions on the canvas. The toolbar remains useful for Home/Reset, Back, Forward, Zoom/Pan fallback modes, and Save.
 
 ## D2. What Happens To The View On A New Scan / Preview?
 
@@ -112,7 +116,7 @@ Option A. Every new Scan / Preview redraw resets the view to fit the generated o
 
 ### Resolved Decision
 
-No. V1 should not include custom mouse-wheel zoom. Record it as a future enhancement if the built-in toolbar is not sufficient.
+Yes, as the first follow-up after toolbar integration. Mouse-wheel events over the preview axes should zoom around the cursor. Left-click drag over the preview axes should pan automatically when no toolbar mode is active. Events outside the preview axes should be ignored. If the user explicitly toggles a toolbar Pan/Zoom mode, direct left-drag pan should defer to the toolbar mode.
 
 ## D4. Should Zoom/Pan State Be Persisted?
 
@@ -134,7 +138,6 @@ No. No implementation step, test, manual check, or gate requires opening, inspec
 
 ## Future Follow-Ups
 
-- Mouse-wheel zoom.
 - Custom icon buttons or a smaller toolbar.
 - Persistent view state for comparing repeated scans.
 - A dedicated reset-view button if the Matplotlib toolbar is visually too broad.

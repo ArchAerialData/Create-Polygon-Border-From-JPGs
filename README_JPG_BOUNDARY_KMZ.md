@@ -107,6 +107,10 @@ In the app:
   stem and one polygon placemark per section, such as `Example (1 of 3)`.
 - The preview is schematic only: it plots camera points and the exported
   boundary without an imagery basemap.
+- The preview includes Matplotlib navigation controls for resetting the view,
+  panning, zooming, and saving a preview image.
+- Mouse wheel zooms while the cursor is over the preview, and left-click drag
+  pans the preview without requiring the toolbar Pan button.
 - Full scan/export details are hidden by default so the preview can use the
   main content area.
 
