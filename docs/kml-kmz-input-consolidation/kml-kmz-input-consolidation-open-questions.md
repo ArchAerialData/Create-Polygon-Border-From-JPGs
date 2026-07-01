@@ -22,16 +22,16 @@ Fixed decisions already captured from the user:
 Use this block to answer quickly:
 
 ```text
-D1:
-D2:
-D3:
-D4:
-D5:
-D6:
-D7:
-D8:
-D9:
-D10:
+D1: Recommendation accepted.
+D2: Recommendation accepted.
+D3: Option A
+D4: Recommendation accepted.
+D5: Recommendation accepted.
+D6: Option C would be nice, if the preview can be updated upon changing directions within the UI.
+D7: Recommendation accepted.
+D8: Recommendation accepted.
+D9: Recommendation accepted.
+D10: Recommendation accepted.
 ```
 
 ## D1. Should This App Continue Exporting Only KMZ, Or Mirror KML/KMZ Input Type?
