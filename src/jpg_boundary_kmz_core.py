@@ -51,6 +51,9 @@ BUFFER_MITRE_LIMIT = 3.0
 MAX_SECTION_COUNT = 100
 ACRES_PER_SQUARE_METER = 0.000247105381467
 KML_LINE_WIDTH = 6.0
+VECTOR_SIMPLIFY_MAX_DEVIATION_FT = 5.0
+VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO = 0.01
+VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 32
 
 
 class BoundaryError(RuntimeError):
@@ -105,6 +108,20 @@ class BoundaryMetadata:
     selected_split_direction_deg: float | None = None
     split_area_variance_pct: float = 0.0
     exterior_cleanup: str = ""
+    vector_simplification_before_vertices: int = 0
+    vector_simplification_after_vertices: int = 0
+    vector_simplification_tolerance_ft: float = 0.0
+    vector_simplification_max_deviation_ft: float = 0.0
+    vector_simplification_area_delta_pct: float = 0.0
+
+
+@dataclass(frozen=True)
+class VectorSimplificationStats:
+    before_vertices: int = 0
+    after_vertices: int = 0
+    tolerance_m: float = 0.0
+    max_deviation_m: float = 0.0
+    area_delta_ratio: float = 0.0
 
 
 @dataclass
@@ -457,15 +474,10 @@ def _generate_boundary_from_polygon_vector(
     else:
         final_projected = source_projected
 
-    final_projected = _ensure_polygon(
-        fill_polygon_interiors(densify_projected_geometry(final_projected))
+    final_projected = _require_single_exterior_polygon(
+        fill_polygon_interiors(final_projected),
+        "KML/KMZ polygon input did not produce one exterior-only polygon.",
     )
-    final_wgs84 = transform_geometry(
-        lambda x, y, z=None: to_wgs84.transform(x, y),
-        final_projected,
-    )
-    final_wgs84 = _ensure_polygon(fill_polygon_interiors(final_wgs84))
-    projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
     sections: list[BoundarySection] = []
     split_strategy = "Single polygon"
@@ -474,6 +486,10 @@ def _generate_boundary_from_polygon_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
+    simplification_stats = VectorSimplificationStats(
+        before_vertices=_polygon_vertex_count(final_projected),
+        after_vertices=_polygon_vertex_count(final_projected),
+    )
     if section_count > 1:
         section_label = section_label or vector_geometry.source_path.stem
         sections, split_diagnostics = _build_sections(
@@ -484,12 +500,20 @@ def _generate_boundary_from_polygon_vector(
             to_wgs84,
             split_direction_deg=split_direction_deg,
         )
+        sections, simplification_stats = _simplify_vector_sections(sections, to_wgs84)
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
         split_strategy = split_diagnostics.split_strategy
         selected_split_direction_deg = split_diagnostics.selected_split_direction_deg
         split_area_variance_pct = split_diagnostics.area_variance_pct
+        final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
+    else:
+        final_projected, simplification_stats = _simplify_vector_output_polygon(
+            final_projected
+        )
+        final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
+    projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
     ignored_interior_count = (
         vector_geometry.ignored_interior_ring_count + ignored_generated_interiors
@@ -507,7 +531,7 @@ def _generate_boundary_from_polygon_vector(
         smoothing_ft=0.0,
         containment_padding_ft=0.0,
         concave_ratio=0.0,
-        vertex_count=len(final_wgs84.exterior.coords),
+        vertex_count=_export_vertex_count(final_wgs84, sections),
         section_count=section_count,
         overlap_ft=overlap_ft if section_count > 1 else 0.0,
         shape_label=section_label if section_count > 1 else "",
@@ -523,6 +547,17 @@ def _generate_boundary_from_polygon_vector(
         selected_split_direction_deg=selected_split_direction_deg,
         split_area_variance_pct=split_area_variance_pct,
         exterior_cleanup=_format_exterior_cleanup(ignored_interior_count),
+        vector_simplification_before_vertices=simplification_stats.before_vertices,
+        vector_simplification_after_vertices=simplification_stats.after_vertices,
+        vector_simplification_tolerance_ft=(
+            simplification_stats.tolerance_m * FEET_PER_METER
+        ),
+        vector_simplification_max_deviation_ft=(
+            simplification_stats.max_deviation_m * FEET_PER_METER
+        ),
+        vector_simplification_area_delta_pct=(
+            simplification_stats.area_delta_ratio * 100.0
+        ),
     )
 
     return BoundaryResult(
@@ -550,9 +585,15 @@ def _generate_boundary_from_polyline_vector(
     except PolylineBoundaryError as exc:
         raise BoundaryError(str(exc)) from exc
 
-    final_projected = line_boundary.final_polygon_projected
-    final_wgs84 = line_boundary.final_polygon_wgs84
-    projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
+    final_projected = _require_single_exterior_polygon(
+        fill_polygon_interiors(line_boundary.final_polygon_projected),
+        "Polyline buffer did not produce one exterior-only polygon.",
+    )
+    to_wgs84 = Transformer.from_crs(
+        CRS.from_epsg(line_boundary.epsg),
+        4326,
+        always_xy=True,
+    )
 
     sections: list[BoundarySection] = []
     split_strategy = "Single polygon"
@@ -561,6 +602,10 @@ def _generate_boundary_from_polyline_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
+    simplification_stats = VectorSimplificationStats(
+        before_vertices=_polygon_vertex_count(final_projected),
+        after_vertices=_polygon_vertex_count(final_projected),
+    )
     if section_count > 1:
         section_label = section_label or vector_geometry.source_path.stem
         sections, split_diagnostics = _build_sections(
@@ -568,20 +613,24 @@ def _generate_boundary_from_polyline_vector(
             section_count,
             overlap_ft * METERS_PER_FOOT,
             section_label,
-            Transformer.from_crs(
-                CRS.from_epsg(line_boundary.epsg),
-                4326,
-                always_xy=True,
-            ),
+            to_wgs84,
             split_direction_deg=split_direction_deg,
             axis_hint_deg=line_boundary.source_axis_hint_deg,
         )
+        sections, simplification_stats = _simplify_vector_sections(sections, to_wgs84)
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
         split_strategy = split_diagnostics.split_strategy
         selected_split_direction_deg = split_diagnostics.selected_split_direction_deg
         split_area_variance_pct = split_diagnostics.area_variance_pct
+        final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
+    else:
+        final_projected, simplification_stats = _simplify_vector_output_polygon(
+            final_projected
+        )
+        final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
+    projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
     ignored_interior_count = int(
         line_boundary.diagnostics.get("ignored_interior_ring_count", 0)
@@ -599,7 +648,7 @@ def _generate_boundary_from_polyline_vector(
         smoothing_ft=0.0,
         containment_padding_ft=0.0,
         concave_ratio=0.0,
-        vertex_count=len(final_wgs84.exterior.coords),
+        vertex_count=_export_vertex_count(final_wgs84, sections),
         section_count=section_count,
         overlap_ft=overlap_ft if section_count > 1 else 0.0,
         shape_label=section_label if section_count > 1 else "",
@@ -619,6 +668,17 @@ def _generate_boundary_from_polyline_vector(
         selected_split_direction_deg=selected_split_direction_deg,
         split_area_variance_pct=split_area_variance_pct,
         exterior_cleanup=_format_exterior_cleanup(ignored_interior_count),
+        vector_simplification_before_vertices=simplification_stats.before_vertices,
+        vector_simplification_after_vertices=simplification_stats.after_vertices,
+        vector_simplification_tolerance_ft=(
+            simplification_stats.tolerance_m * FEET_PER_METER
+        ),
+        vector_simplification_max_deviation_ft=(
+            simplification_stats.max_deviation_m * FEET_PER_METER
+        ),
+        vector_simplification_area_delta_pct=(
+            simplification_stats.area_delta_ratio * 100.0
+        ),
     )
 
     return BoundaryResult(
@@ -729,6 +789,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
             )
         if metadata.exterior_cleanup:
             lines.append(f"Exterior cleanup: {metadata.exterior_cleanup}")
+        lines.extend(_format_vector_simplification_lines(metadata))
     lines.extend(
         [
             f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
@@ -797,6 +858,173 @@ def _build_sections(
         for section in natural_sections
     ]
     return sections, diagnostics
+
+
+def _simplify_vector_output_polygon(
+    polygon: Polygon,
+    *,
+    max_deviation_ft: float = VECTOR_SIMPLIFY_MAX_DEVIATION_FT,
+    max_area_delta_ratio: float = VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO,
+) -> tuple[Polygon, VectorSimplificationStats]:
+    original = _require_single_exterior_polygon(
+        fill_polygon_interiors(polygon),
+        "Vector output polygon is not one exterior-only polygon.",
+    )
+    before_vertices = _polygon_vertex_count(original)
+    max_deviation_m = max_deviation_ft * METERS_PER_FOOT
+    if max_deviation_m <= 0 or original.area <= 0:
+        return original, VectorSimplificationStats(before_vertices, before_vertices)
+
+    best_polygon = original
+    best_tolerance_m = 0.0
+    best_deviation_m = 0.0
+    best_area_delta_ratio = 0.0
+    low = 0.0
+    high = max_deviation_m
+
+    for _index in range(VECTOR_SIMPLIFY_SEARCH_ITERATIONS):
+        tolerance_m = (low + high) / 2.0
+        candidate = _strict_vector_simplification_candidate(
+            original.simplify(tolerance_m, preserve_topology=True)
+        )
+        if candidate is None:
+            high = tolerance_m
+            continue
+
+        deviation_m = float(original.hausdorff_distance(candidate))
+        area_delta_ratio = _polygon_area_delta_ratio(original, candidate)
+        if (
+            deviation_m <= max_deviation_m + 1e-9
+            and area_delta_ratio <= max_area_delta_ratio + 1e-9
+        ):
+            best_polygon = candidate
+            best_tolerance_m = tolerance_m
+            best_deviation_m = deviation_m
+            best_area_delta_ratio = area_delta_ratio
+            low = tolerance_m
+        else:
+            high = tolerance_m
+
+    after_vertices = _polygon_vertex_count(best_polygon)
+    if after_vertices >= before_vertices:
+        return original, VectorSimplificationStats(before_vertices, before_vertices)
+
+    return best_polygon, VectorSimplificationStats(
+        before_vertices=before_vertices,
+        after_vertices=after_vertices,
+        tolerance_m=best_tolerance_m,
+        max_deviation_m=best_deviation_m,
+        area_delta_ratio=best_area_delta_ratio,
+    )
+
+
+def _simplify_vector_sections(
+    sections: list[BoundarySection],
+    to_wgs84: Transformer,
+) -> tuple[list[BoundarySection], VectorSimplificationStats]:
+    simplified_sections: list[BoundarySection] = []
+    stats: list[VectorSimplificationStats] = []
+    for section in sections:
+        simplified_projected, section_stats = _simplify_vector_output_polygon(
+            section.polygon_projected
+        )
+        simplified_wgs84 = _project_polygon_to_wgs84(simplified_projected, to_wgs84)
+        simplified_sections.append(
+            BoundarySection(
+                index=section.index,
+                total=section.total,
+                display_name=section.display_name,
+                base_area_acres=section.base_area_acres,
+                polygon_projected=simplified_projected,
+                polygon_wgs84=simplified_wgs84,
+            )
+        )
+        stats.append(section_stats)
+    return simplified_sections, _combine_vector_simplification_stats(stats)
+
+
+def _combine_vector_simplification_stats(
+    stats: list[VectorSimplificationStats],
+) -> VectorSimplificationStats:
+    if not stats:
+        return VectorSimplificationStats()
+    return VectorSimplificationStats(
+        before_vertices=sum(item.before_vertices for item in stats),
+        after_vertices=sum(item.after_vertices for item in stats),
+        tolerance_m=max(item.tolerance_m for item in stats),
+        max_deviation_m=max(item.max_deviation_m for item in stats),
+        area_delta_ratio=max(item.area_delta_ratio for item in stats),
+    )
+
+
+def _project_polygon_to_wgs84(polygon: Polygon, to_wgs84: Transformer) -> Polygon:
+    polygon_wgs84 = transform_geometry(
+        lambda x, y, z=None: to_wgs84.transform(x, y),
+        polygon,
+    )
+    return _require_single_exterior_polygon(
+        fill_polygon_interiors(polygon_wgs84),
+        "Vector output polygon could not be transformed to WGS84.",
+    )
+
+
+def _strict_vector_simplification_candidate(geometry) -> Polygon | None:
+    if geometry.is_empty:
+        return None
+    if not geometry.is_valid:
+        geometry = make_valid(geometry)
+    geometry = fill_polygon_interiors(geometry)
+    if isinstance(geometry, Polygon) and geometry.area > 0 and not geometry.interiors:
+        return geometry
+    if isinstance(geometry, MultiPolygon):
+        polygons = [
+            part
+            for part in geometry.geoms
+            if isinstance(part, Polygon)
+            and part.area > 0
+            and not part.interiors
+            and not part.is_empty
+        ]
+        if len(polygons) == 1:
+            return polygons[0]
+    if isinstance(geometry, GeometryCollection):
+        polygons = [
+            part
+            for part in geometry.geoms
+            if isinstance(part, Polygon)
+            and part.area > 0
+            and not part.interiors
+            and not part.is_empty
+        ]
+        if len(polygons) == 1:
+            return polygons[0]
+    return None
+
+
+def _require_single_exterior_polygon(geometry, message: str) -> Polygon:
+    polygon = _strict_vector_simplification_candidate(geometry)
+    if polygon is None:
+        raise BoundaryError(message)
+    return polygon
+
+
+def _polygon_vertex_count(polygon: Polygon) -> int:
+    return len(polygon.exterior.coords)
+
+
+def _polygon_area_delta_ratio(original: Polygon, candidate: Polygon) -> float:
+    if original.area <= 0:
+        return 0.0
+    return float(original.symmetric_difference(candidate).area / original.area)
+
+
+def _export_vertex_count(
+    final_polygon_wgs84: Polygon,
+    sections: list[BoundarySection],
+) -> int:
+    if sections:
+        return sum(_polygon_vertex_count(section.polygon_wgs84) for section in sections)
+    return _polygon_vertex_count(final_polygon_wgs84)
 
 
 def _partition_connected_polygon(
@@ -982,6 +1210,30 @@ def _format_exterior_cleanup(ignored_interior_count: int) -> str:
     if ignored_interior_count:
         return "Interior rings filled; exterior boundary only."
     return "Exterior boundary only."
+
+
+def _format_vector_simplification_lines(metadata: BoundaryMetadata) -> list[str]:
+    if metadata.vector_simplification_before_vertices <= 0:
+        return []
+    return [
+        (
+            "Vector simplification: "
+            f"{metadata.vector_simplification_before_vertices:,} -> "
+            f"{metadata.vector_simplification_after_vertices:,} vertices"
+        ),
+        (
+            "Vector simplification tolerance: "
+            f"{metadata.vector_simplification_tolerance_ft:.2f} ft"
+        ),
+        (
+            "Vector simplification max deviation: "
+            f"{metadata.vector_simplification_max_deviation_ft:.2f} ft"
+        ),
+        (
+            "Vector simplification area delta: "
+            f"{metadata.vector_simplification_area_delta_pct:.3f}%"
+        ),
+    ]
 
 
 def _count_polygon_interiors(geometry) -> int:
@@ -1317,6 +1569,7 @@ def _build_kml_description(
             )
         if metadata.exterior_cleanup:
             lines.append(f"Exterior cleanup: {metadata.exterior_cleanup}")
+        lines.extend(_format_vector_simplification_lines(metadata))
     if metadata.section_count > 1:
         lines.extend(
             [

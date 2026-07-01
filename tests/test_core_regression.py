@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 import zipfile
 from pathlib import Path
@@ -7,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from pyproj import CRS, Transformer
 from shapely.geometry import Polygon
 
 from tests.geometry_test_utils import synthetic_point
@@ -22,8 +24,10 @@ from jpg_boundary_kmz_core import (  # noqa: E402
     generate_boundary,
     generate_boundary_from_input,
     generate_boundary_from_kmz,
+    save_kmz,
     _strict_single_polygon,
 )
+from natural_sectioning import build_natural_sections  # noqa: E402
 from outline_strategies import OUTLINE_MODE_CONCAVE  # noqa: E402
 
 
@@ -101,6 +105,111 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(result.metadata.input_type, "KML polygon")
             self.assertEqual(result.metadata.ignored_interior_ring_count, 1)
             self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_dense_polygon_kml_input_is_automatically_simplified(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "dense_polygon.kml"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=0.0)
+            summary = format_summary(result.metadata)
+
+            self.assertLess(
+                result.metadata.vector_simplification_after_vertices,
+                result.metadata.vector_simplification_before_vertices,
+            )
+            self.assertEqual(
+                result.metadata.vector_simplification_after_vertices,
+                len(result.final_polygon_wgs84.exterior.coords),
+            )
+            self.assertLessEqual(
+                result.metadata.vector_simplification_max_deviation_ft,
+                5.001,
+            )
+            self.assertLessEqual(
+                result.metadata.vector_simplification_area_delta_pct,
+                1.001,
+            )
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+            self.assertIn("Vector simplification:", summary)
+
+    def test_dense_polyline_kml_buffer_is_automatically_simplified(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "dense_line.kml"
+            _write_text_kml(kml_path, _dense_line_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=120.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertLess(
+                result.metadata.vector_simplification_after_vertices,
+                result.metadata.vector_simplification_before_vertices,
+            )
+            self.assertLessEqual(
+                result.metadata.vector_simplification_max_deviation_ft,
+                5.001,
+            )
+            self.assertLessEqual(
+                result.metadata.vector_simplification_area_delta_pct,
+                1.001,
+            )
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_vector_sections_are_simplified_and_export_outer_boundaries(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kml_path = tmp_path / "dense_polygon.kml"
+            output_path = tmp_path / "sections.kmz"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            result = generate_boundary_from_input(
+                kml_path,
+                buffer_ft=0.0,
+                section_count=3,
+                overlap_ft=0.0,
+                shape_label="Crop",
+                split_direction_deg=90.0,
+            )
+            to_wgs84 = Transformer.from_crs(
+                CRS.from_epsg(result.metadata.epsg),
+                4326,
+                always_xy=True,
+            )
+            raw_sections, _diagnostics = build_natural_sections(
+                result.final_polygon_projected,
+                3,
+                0.0,
+                "Crop",
+                to_wgs84,
+                split_direction_deg=90.0,
+            )
+
+            self.assertEqual(len(result.sections), 3)
+            self.assertLess(
+                result.metadata.vector_simplification_after_vertices,
+                result.metadata.vector_simplification_before_vertices,
+            )
+            self.assertEqual(
+                result.metadata.vertex_count,
+                sum(len(section.polygon_wgs84.exterior.coords) for section in result.sections),
+            )
+            for raw_section, simplified_section in zip(raw_sections, result.sections):
+                self.assertLess(
+                    len(simplified_section.polygon_projected.exterior.coords),
+                    len(raw_section.polygon_projected.exterior.coords),
+                )
+                self.assertTrue(simplified_section.polygon_projected.is_valid)
+                self.assertEqual(len(simplified_section.polygon_projected.interiors), 0)
+                self.assertEqual(
+                    simplified_section.display_name,
+                    f"Crop ({simplified_section.index} of 3)",
+                )
+
+            save_kmz(result, output_path)
+            with zipfile.ZipFile(output_path) as archive:
+                kml_text = archive.read("doc.kml").decode("utf-8")
+            self.assertEqual(kml_text.count("<Polygon"), 3)
+            self.assertNotIn("innerBoundaryIs", kml_text)
 
     def test_existing_concave_mode_still_generates_polygon(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -222,5 +331,49 @@ def _polygon_kml_body(*, hole: bool = False) -> str:
         </outerBoundaryIs>
         {inner}
       </Polygon>
+    </Placemark>
+"""
+
+
+def _dense_polygon_kml_body(point_count: int = 240) -> str:
+    center_lon = -80.0000
+    center_lat = 35.0000
+    radius_lon = 0.0022
+    radius_lat = 0.0017
+    coords: list[str] = []
+    for index in range(point_count):
+        angle = 2.0 * math.pi * index / point_count
+        ripple = 1.0 + 0.015 * math.sin(angle * 12.0)
+        lon = center_lon + radius_lon * ripple * math.cos(angle)
+        lat = center_lat + radius_lat * ripple * math.sin(angle)
+        coords.append(f"{lon:.8f},{lat:.8f},0")
+    coords.append(coords[0])
+    coordinate_text = " ".join(coords)
+    return f"""
+    <Placemark>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>{coordinate_text}</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+"""
+
+
+def _dense_line_kml_body(point_count: int = 180) -> str:
+    coords: list[str] = []
+    for index in range(point_count):
+        t = index / (point_count - 1)
+        lon = -80.0030 + 0.0060 * t
+        lat = 35.0000 + 0.0020 * t + 0.00012 * math.sin(t * math.pi * 10.0)
+        coords.append(f"{lon:.8f},{lat:.8f},0")
+    coordinate_text = " ".join(coords)
+    return f"""
+    <Placemark>
+      <LineString>
+        <coordinates>{coordinate_text}</coordinates>
+      </LineString>
     </Placemark>
 """
