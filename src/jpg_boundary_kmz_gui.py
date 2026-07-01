@@ -1205,9 +1205,15 @@ class BoundaryKmzApp:
             int(section_count),
             float(overlap_ft),
             shape_label.strip(),
-            outline_mode,
+            BoundaryKmzApp._settings_outline_key(outline_mode),
             "auto" if split_direction_deg is None else f"{float(split_direction_deg) % 180.0:.6f}",
         )
+
+    @staticmethod
+    def _settings_outline_key(outline_mode: str) -> str:
+        if outline_mode in {OUTLINE_MODE_SOURCE_POLYGON, "source_linework"}:
+            return "source_vector"
+        return outline_mode
 
     @staticmethod
     def _default_output_path(input_path: Path | None = None) -> Path:

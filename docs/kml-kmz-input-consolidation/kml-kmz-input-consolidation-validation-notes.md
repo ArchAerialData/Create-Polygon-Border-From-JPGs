@@ -1,6 +1,6 @@
 # KML/KMZ Input Consolidation Validation Notes
 
-Status: automated validation passed; required North 2 real-sample validation blocked because the source paths are not accessible in this environment.
+Status: automated validation passed; North 2 real-sample validation explicitly bypassed by the user because the source files were deleted and would need to be recreated.
 
 Date: 2026-07-01
 
@@ -9,18 +9,22 @@ Date: 2026-07-01
 ```powershell
 git status --short --branch
 git check-ignore -v test_data/
+python -B -m unittest tests.test_gui_input
 python -B -m unittest discover -s tests
 python -B -c "from pathlib import Path; files=list(Path('src').rglob('*.py')); [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in files]; print(f'compiled {len(files)} source files')"
 python -B -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('src').resolve())); from jpg_boundary_kmz_gui import _create_root, BoundaryKmzApp; root=_create_root(); root.withdraw(); app=BoundaryKmzApp(root); root.update_idletasks(); root.destroy(); print('GUI smoke ok')"
 git diff --name-only
+git diff --check
 ```
 
 Results:
 
 - `git check-ignore -v test_data/`: passed; `.gitignore:2:test_data/ test_data/`.
-- `python -B -m unittest discover -s tests`: passed; 50 tests.
+- `python -B -m unittest tests.test_gui_input`: passed; 7 tests.
+- `python -B -m unittest discover -s tests`: passed; 51 tests.
 - source compile command: passed; 9 source files.
 - GUI smoke command: passed; `GUI smoke ok`.
+- `git diff --check`: passed; only normal line-ending warnings were reported.
 
 ## Disposable Synthetic Validation
 
@@ -68,7 +72,7 @@ Result:
 - Source KML: `False`.
 - Reference KML: `False`.
 
-Because both required files are inaccessible, the North 2 exterior-boundary comparison and visual crop-shape validation could not be completed in this environment.
+Because both files are inaccessible and the user approved a bypass for this specific deleted-file validation requirement, the North 2 exterior-boundary comparison and visual crop-shape validation are not a closeout blocker for this implementation.
 
 ## Safety Confirmation
 
@@ -80,4 +84,4 @@ Because both required files are inaccessible, the North 2 exterior-boundary comp
 
 ## Residual Risk
 
-- Real-sample validation against the North 2 source KML and 170 ft reference KML remains required once those paths are available.
+- The deleted North 2 source/reference files were not validated. Replacement real-world sample validation remains useful if those files are recreated, but this requirement is explicitly bypassed for current closeout.

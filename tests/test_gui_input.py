@@ -62,6 +62,32 @@ class GuiInputTests(TestCase):
 
             self.assertNotEqual(auto_key, explicit_key)
 
+    def test_settings_key_normalizes_vector_outline_modes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.kml"
+            path.write_text("<kml/>", encoding="utf-8")
+
+            source_polygon_key = BoundaryKmzApp._settings_key(
+                path,
+                170.0,
+                2,
+                50.0,
+                "Shape",
+                "source_polygon",
+                None,
+            )
+            source_linework_key = BoundaryKmzApp._settings_key(
+                path,
+                170.0,
+                2,
+                50.0,
+                "Shape",
+                "source_linework",
+                None,
+            )
+
+            self.assertEqual(source_polygon_key, source_linework_key)
+
     def test_vector_input_disables_outline_mode(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
             kml_path = Path(tmp) / "input.kml"
