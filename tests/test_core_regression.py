@@ -9,7 +9,8 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from pyproj import CRS, Transformer
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon, box
+from shapely.ops import unary_union
 
 from tests.geometry_test_utils import synthetic_point
 
@@ -228,7 +229,74 @@ class CoreRegressionTests(TestCase):
             result = generate_boundary_from_kmz(kmz_path, buffer_ft=0.0, section_count=2)
 
             self.assertEqual(len(result.sections), 2)
-            self.assertTrue(all(section.polygon_projected.is_valid for section in result.sections))
+
+    def test_polygon_kmz_sections_ignore_minor_overlap_slivers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kmz_path = tmp_path / "source.kmz"
+            output_path = tmp_path / "sections.kmz"
+            _write_test_kmz(
+                kmz_path,
+                body=_projected_polygon_kml_body(
+                    _minor_overlap_sliver_projected_parent()
+                ),
+            )
+
+            result = generate_boundary_from_input(
+                kmz_path,
+                buffer_ft=0.0,
+                section_count=2,
+                overlap_ft=70.0,
+                shape_label="Crop",
+                split_direction_deg=0.0,
+            )
+
+            self.assertEqual(len(result.sections), 2)
+            self.assertEqual(result.metadata.input_type, "KMZ polygon")
+            self.assertTrue(
+                all(
+                    not section.polygon_projected.interiors
+                    for section in result.sections
+                )
+            )
+            save_kmz(result, output_path)
+            with zipfile.ZipFile(output_path) as archive:
+                kml_text = archive.read("doc.kml").decode("utf-8")
+            self.assertEqual(kml_text.count("<Polygon"), 2)
+            self.assertNotIn("innerBoundaryIs", kml_text)
+            self.assertTrue(
+                all(section.polygon_projected.is_valid for section in result.sections)
+            )
+
+    def test_polygon_kmz_auto_sections_retry_candidate_directions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kmz_path = tmp_path / "auto_sections.kmz"
+            output_path = tmp_path / "auto_sections_output.kmz"
+            _write_test_kmz(
+                kmz_path,
+                body=_projected_polygon_kml_body(
+                    _auto_retry_corridor_projected_parent()
+                ),
+            )
+
+            result = generate_boundary_from_input(
+                kmz_path,
+                buffer_ft=0.0,
+                section_count=2,
+                overlap_ft=50.0,
+                shape_label="Auto Crop",
+                split_direction_deg=None,
+            )
+
+            self.assertEqual(len(result.sections), 2)
+            self.assertEqual(result.metadata.input_type, "KMZ polygon")
+            self.assertIsNotNone(result.metadata.selected_split_direction_deg)
+            save_kmz(result, output_path)
+            with zipfile.ZipFile(output_path) as archive:
+                kml_text = archive.read("doc.kml").decode("utf-8")
+            self.assertEqual(kml_text.count("<Polygon"), 2)
+            self.assertNotIn("innerBoundaryIs", kml_text)
 
     def test_unknown_outline_mode_raises_boundary_error(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -375,5 +443,53 @@ def _dense_line_kml_body(point_count: int = 180) -> str:
       <LineString>
         <coordinates>{coordinate_text}</coordinates>
       </LineString>
+    </Placemark>
+"""
+
+
+def _minor_overlap_sliver_projected_parent() -> Polygon:
+    x_offset = 365000.0
+    y_offset = 3315000.0
+    geometry = unary_union(
+        [
+            box(x_offset, y_offset, x_offset + 100, y_offset + 1000),
+            box(x_offset + 100, y_offset + 488, x_offset + 120, y_offset + 488.5),
+            box(x_offset + 119, y_offset + 488.5, x_offset + 123, y_offset + 493.5),
+        ]
+    )
+    if not isinstance(geometry, Polygon):
+        raise AssertionError(f"Expected one polygon, got {geometry.geom_type}.")
+    return geometry
+
+
+def _auto_retry_corridor_projected_parent() -> Polygon:
+    x_offset = 365000.0
+    y_offset = 3315000.0
+    return LineString(
+        [
+            (x_offset, y_offset),
+            (x_offset + 2000, y_offset + 2000),
+            (x_offset + 4000, y_offset + 1000),
+            (x_offset + 6000, y_offset + 3000),
+        ]
+    ).buffer(100, cap_style="flat", join_style="mitre")
+
+
+def _projected_polygon_kml_body(polygon: Polygon, epsg: int = 32615) -> str:
+    to_wgs84 = Transformer.from_crs(CRS.from_epsg(epsg), 4326, always_xy=True)
+    coords = []
+    for x, y in polygon.exterior.coords:
+        lon, lat = to_wgs84.transform(x, y)
+        coords.append(f"{lon:.8f},{lat:.8f},0")
+    coordinate_text = " ".join(coords)
+    return f"""
+    <Placemark>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>{coordinate_text}</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
     </Placemark>
 """
