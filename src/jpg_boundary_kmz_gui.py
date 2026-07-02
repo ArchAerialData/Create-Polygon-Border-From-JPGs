@@ -1063,6 +1063,7 @@ class BoundaryKmzApp:
             if kind == "scan_done":
                 result = payload
                 assert isinstance(result, BoundaryResult)
+                self._sync_effective_buffer(result)
                 self._cached_result = result
                 self._cached_settings = self._settings_key(
                     result.metadata.source_folder,
@@ -1084,6 +1085,7 @@ class BoundaryKmzApp:
                 result, saved_path = payload
                 assert isinstance(result, BoundaryResult)
                 saved_path = Path(saved_path)
+                self._sync_effective_buffer(result)
                 self._cached_result = result
                 self._cached_settings = self._settings_key(
                     result.metadata.source_folder,
@@ -1894,9 +1896,24 @@ class BoundaryKmzApp:
 
     @staticmethod
     def _ready_status(result: BoundaryResult, base_status: str) -> str:
+        if result.metadata.polyline_buffer_adjustment_reason:
+            return f"{base_status} Auto buffer set."
         if result.metadata.fallback_reason:
             return f"{base_status} Auto fallback used."
         return base_status
+
+    def _sync_effective_buffer(self, result: BoundaryResult) -> None:
+        if not result.metadata.polyline_buffer_adjustment_reason:
+            return
+        selected_buffer = result.metadata.polyline_selected_buffer_ft or result.metadata.buffer_ft
+        self.buffer_var.set(self._format_buffer_field_value(selected_buffer))
+
+    @staticmethod
+    def _format_buffer_field_value(value: float) -> str:
+        rounded = round(float(value))
+        if math.isclose(float(value), rounded, abs_tol=1e-9):
+            return str(int(rounded))
+        return f"{float(value):.2f}".rstrip("0").rstrip(".")
 
     def _parse_dropped_paths(self, data: str) -> list[Path]:
         if not data:

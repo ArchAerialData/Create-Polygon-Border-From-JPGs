@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -425,6 +426,33 @@ class GuiInputTests(TestCase):
 
             self.assertNotEqual(axes.get_xlim(), before_xlim)
             self.assertNotEqual(axes.get_ylim(), before_ylim)
+
+    def test_scan_done_auto_selected_polyline_buffer_updates_buffer_field(self) -> None:
+        with _app() as app:
+            result = _sample_boundary_result()
+            result.metadata = replace(
+                result.metadata,
+                input_type="KML polyline",
+                buffer_ft=114.0,
+                source_line_count=2,
+                source_point_count=20,
+                polyline_requested_buffer_ft=0.0,
+                polyline_minimum_connected_buffer_ft=81.0,
+                polyline_selected_buffer_ft=114.0,
+                polyline_buffer_regularity_ratio=1.54,
+                polyline_buffer_regularity_target=1.55,
+                polyline_buffer_candidate_count=30,
+                polyline_buffer_adjustment_reason=(
+                    "Requested buffer was zero; auto-selected a connected regular buffer."
+                ),
+            )
+            app.buffer_var.set("0")
+            app._queue.put(("scan_done", result))
+
+            app._drain_queue()
+
+            self.assertEqual(app.buffer_var.get(), "114")
+            self.assertIn("Selected polyline buffer: 114.0 ft", app._details_text)
 
 
 class _app:

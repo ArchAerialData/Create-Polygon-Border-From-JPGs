@@ -38,7 +38,10 @@ from outline_strategies import (
     select_outline,
     summarize_candidates,
 )
-from polyline_boundary import PolylineBoundaryError, build_polyline_boundary
+from polyline_boundary import (
+    PolylineBoundaryError,
+    build_polyline_boundary_with_recommended_buffer,
+)
 
 
 FEET_PER_METER = 3.280839895
@@ -115,6 +118,13 @@ class BoundaryMetadata:
     vector_simplification_tolerance_ft: float = 0.0
     vector_simplification_max_deviation_ft: float = 0.0
     vector_simplification_area_delta_pct: float = 0.0
+    polyline_requested_buffer_ft: float = 0.0
+    polyline_minimum_connected_buffer_ft: float = 0.0
+    polyline_selected_buffer_ft: float = 0.0
+    polyline_buffer_regularity_ratio: float = 0.0
+    polyline_buffer_regularity_target: float = 0.0
+    polyline_buffer_candidate_count: int = 0
+    polyline_buffer_adjustment_reason: str = ""
     generation_profile: str = GENERATION_PROFILE_EXPORT
 
 
@@ -606,10 +616,14 @@ def _generate_boundary_from_polyline_vector(
     generation_profile: str,
 ) -> BoundaryResult:
     try:
-        line_boundary = build_polyline_boundary(vector_geometry.lines_wgs84, buffer_ft)
+        line_boundary = build_polyline_boundary_with_recommended_buffer(
+            vector_geometry.lines_wgs84,
+            buffer_ft,
+        )
     except PolylineBoundaryError as exc:
         raise BoundaryError(str(exc)) from exc
 
+    effective_buffer_ft = float(line_boundary.diagnostics.get("buffer_ft", buffer_ft))
     final_projected = _require_single_exterior_polygon(
         fill_polygon_interiors(line_boundary.final_polygon_projected),
         "Polyline buffer did not produce one exterior-only polygon.",
@@ -677,7 +691,7 @@ def _generate_boundary_from_polyline_vector(
         skipped_count=0,
         epsg=line_boundary.epsg,
         crs_name=line_boundary.crs_name,
-        buffer_ft=buffer_ft,
+        buffer_ft=effective_buffer_ft,
         median_spacing_ft=0.0,
         smoothing_ft=0.0,
         containment_padding_ft=0.0,
@@ -712,6 +726,27 @@ def _generate_boundary_from_polyline_vector(
         ),
         vector_simplification_area_delta_pct=(
             simplification_stats.area_delta_ratio * 100.0
+        ),
+        polyline_requested_buffer_ft=float(
+            line_boundary.diagnostics.get("requested_buffer_ft", buffer_ft)
+        ),
+        polyline_minimum_connected_buffer_ft=float(
+            line_boundary.diagnostics.get("minimum_connected_buffer_ft", 0.0)
+        ),
+        polyline_selected_buffer_ft=float(
+            line_boundary.diagnostics.get("selected_buffer_ft", effective_buffer_ft)
+        ),
+        polyline_buffer_regularity_ratio=float(
+            line_boundary.diagnostics.get("regularity_ratio", 0.0)
+        ),
+        polyline_buffer_regularity_target=float(
+            line_boundary.diagnostics.get("regularity_target", 0.0)
+        ),
+        polyline_buffer_candidate_count=int(
+            line_boundary.diagnostics.get("candidate_count", 0)
+        ),
+        polyline_buffer_adjustment_reason=str(
+            line_boundary.diagnostics.get("adjustment_reason", "")
         ),
         generation_profile=generation_profile,
     )
@@ -820,6 +855,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
                     "Using source LineStrings; polygons ignored: "
                     f"{metadata.ignored_polygon_count:,}"
                 )
+            lines.extend(_format_polyline_auto_buffer_lines(metadata))
         else:
             lines.append("Source polygon: 1")
         if metadata.ignored_interior_ring_count:
@@ -1346,6 +1382,35 @@ def _format_vector_simplification_lines(metadata: BoundaryMetadata) -> list[str]
     ]
 
 
+def _format_polyline_auto_buffer_lines(metadata: BoundaryMetadata) -> list[str]:
+    if not metadata.source_line_count or metadata.polyline_buffer_candidate_count <= 0:
+        return []
+
+    lines = [
+        f"Requested polyline buffer: {metadata.polyline_requested_buffer_ft:,.1f} ft",
+        (
+            "Minimum connected polyline buffer: "
+            f"{metadata.polyline_minimum_connected_buffer_ft:,.1f} ft"
+        ),
+        f"Selected polyline buffer: {metadata.polyline_selected_buffer_ft:,.1f} ft",
+    ]
+    if metadata.polyline_buffer_regularity_target > 0:
+        lines.append(
+            "Polyline regularity ratio: "
+            f"{metadata.polyline_buffer_regularity_ratio:.3f} "
+            f"(target <= {metadata.polyline_buffer_regularity_target:.2f})"
+        )
+    lines.append(
+        f"Polyline buffer candidates tested: {metadata.polyline_buffer_candidate_count:,}"
+    )
+    if metadata.polyline_buffer_adjustment_reason:
+        lines.append(
+            "Polyline buffer adjustment: "
+            f"{metadata.polyline_buffer_adjustment_reason}"
+        )
+    return lines
+
+
 def _count_polygon_interiors(geometry) -> int:
     if isinstance(geometry, Polygon):
         return len(geometry.interiors)
@@ -1671,6 +1736,7 @@ def _build_kml_description(
                     "Using source LineStrings; polygons ignored: "
                     f"{metadata.ignored_polygon_count:,}"
                 )
+            lines.extend(_format_polyline_auto_buffer_lines(metadata))
         else:
             lines.append("Source polygon: 1")
         if metadata.ignored_interior_ring_count:

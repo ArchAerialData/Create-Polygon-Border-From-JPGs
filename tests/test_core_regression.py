@@ -68,13 +68,21 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(result.metadata.source_line_count, 1)
             self.assertEqual(len(result.final_polygon_projected.interiors), 0)
 
-    def test_linestring_input_requires_positive_buffer(self) -> None:
+    def test_linestring_input_zero_buffer_auto_selects_positive_buffer(self) -> None:
         with TemporaryDirectory() as tmp:
             kml_path = Path(tmp) / "source_lines.kml"
             _write_text_kml(kml_path, _line_kml_body())
 
-            with self.assertRaisesRegex(BoundaryError, "greater than 0 ft"):
-                generate_boundary_from_input(kml_path, buffer_ft=0.0)
+            result = generate_boundary_from_input(kml_path, buffer_ft=0.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertEqual(result.metadata.polyline_requested_buffer_ft, 0.0)
+            self.assertGreater(result.metadata.buffer_ft, 0.0)
+            self.assertEqual(
+                result.metadata.buffer_ft,
+                result.metadata.polyline_selected_buffer_ft,
+            )
+            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
 
     def test_mixed_vector_input_uses_lines_and_reports_ignored_polygon(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -157,6 +165,63 @@ class CoreRegressionTests(TestCase):
                 1.001,
             )
             self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_problem_polyline_kml_auto_selects_regular_buffer(self) -> None:
+        kml_path = (
+            ROOT
+            / "test_data"
+            / "new-failures-debugging"
+            / "input-kml"
+            / "photo_polylines_20260702_095008.kml"
+        )
+        self.assertTrue(kml_path.exists())
+
+        for requested_buffer_ft in (0.0, 80.0, 84.0, 85.0):
+            with self.subTest(requested_buffer_ft=requested_buffer_ft):
+                result = generate_boundary_from_input(
+                    kml_path,
+                    buffer_ft=requested_buffer_ft,
+                    generation_profile=GENERATION_PROFILE_PREVIEW,
+                )
+
+                self.assertEqual(result.metadata.input_type, "KML polyline")
+                self.assertAlmostEqual(
+                    result.metadata.polyline_requested_buffer_ft,
+                    requested_buffer_ft,
+                )
+                self.assertGreaterEqual(
+                    result.metadata.buffer_ft,
+                    result.metadata.polyline_minimum_connected_buffer_ft,
+                )
+                self.assertEqual(
+                    result.metadata.buffer_ft,
+                    result.metadata.polyline_selected_buffer_ft,
+                )
+                self.assertLessEqual(
+                    result.metadata.polyline_buffer_regularity_ratio,
+                    result.metadata.polyline_buffer_regularity_target,
+                )
+                self.assertGreater(result.metadata.polyline_buffer_candidate_count, 0)
+                self.assertTrue(result.metadata.polyline_buffer_adjustment_reason)
+                self.assertTrue(result.final_polygon_projected.is_valid)
+                self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+
+    def test_regular_explicit_polyline_buffer_is_not_adjusted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "source_lines.kml"
+            _write_text_kml(kml_path, _line_kml_body())
+
+            result = generate_boundary_from_input(kml_path, buffer_ft=100.0)
+
+            self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertEqual(result.metadata.buffer_ft, 100.0)
+            self.assertEqual(result.metadata.polyline_requested_buffer_ft, 100.0)
+            self.assertEqual(result.metadata.polyline_selected_buffer_ft, 100.0)
+            self.assertFalse(result.metadata.polyline_buffer_adjustment_reason)
+            self.assertLessEqual(
+                result.metadata.polyline_buffer_regularity_ratio,
+                result.metadata.polyline_buffer_regularity_target,
+            )
 
     def test_vector_sections_are_simplified_and_export_outer_boundaries(self) -> None:
         with TemporaryDirectory() as tmp:
