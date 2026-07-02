@@ -35,7 +35,7 @@ class NaturalSection:
 
 @dataclass(frozen=True)
 class NaturalSplitDiagnostics:
-    selected_split_direction_deg: float
+    selected_split_direction_deg: float | None
     section_count: int
     area_min_acres: float
     area_max_acres: float

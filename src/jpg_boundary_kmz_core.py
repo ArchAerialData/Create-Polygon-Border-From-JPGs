@@ -31,7 +31,11 @@ from geometry_hardening import (
     fill_polygon_interiors,
 )
 from kml_vector_input import VectorInputError, VectorInputGeometry, load_vector_input
-from natural_sectioning import NaturalSplitError, build_natural_sections
+from natural_sectioning import (
+    NaturalSplitDiagnostics,
+    NaturalSplitError,
+    build_natural_sections,
+)
 from outline_strategies import (
     OUTLINE_MODE_AUTO,
     OUTLINE_MODES,
@@ -921,6 +925,20 @@ def _build_sections(
             densify_sections=densify_sections,
         )
     except NaturalSplitError as exc:
+        if split_direction_deg is None:
+            try:
+                return _build_recursive_connected_sections(
+                    parent_polygon,
+                    section_count,
+                    overlap_m,
+                    shape_label,
+                    to_wgs84,
+                    densify_sections=densify_sections,
+                )
+            except BoundaryError as fallback_exc:
+                raise BoundaryError(
+                    f"{exc} Connected fallback also failed: {fallback_exc}"
+                ) from fallback_exc
         raise BoundaryError(str(exc)) from exc
 
     sections = [
@@ -935,6 +953,87 @@ def _build_sections(
         for section in natural_sections
     ]
     return sections, diagnostics
+
+
+def _build_recursive_connected_sections(
+    parent_polygon: Polygon,
+    section_count: int,
+    overlap_m: float,
+    shape_label: str,
+    to_wgs84: Transformer,
+    *,
+    densify_sections: bool,
+) -> tuple[list[BoundarySection], NaturalSplitDiagnostics]:
+    base_parts, split_angles = _partition_connected_polygon(parent_polygon, section_count)
+    sections: list[BoundarySection] = []
+    base_area_acres: list[float] = []
+
+    for index, base_part in enumerate(base_parts, start=1):
+        projected = _recursive_section_output_polygon(
+            parent_polygon,
+            base_part,
+            overlap_m,
+        )
+        if densify_sections:
+            projected = _require_single_exterior_polygon(
+                densify_projected_geometry(projected),
+                "Connected fallback section could not be densified.",
+            )
+        polygon_wgs84 = _project_polygon_to_wgs84(projected, to_wgs84)
+        base_area_acres.append(base_part.area * ACRES_PER_SQUARE_METER)
+        sections.append(
+            BoundarySection(
+                index=index,
+                total=section_count,
+                display_name=f"{shape_label} ({index} of {section_count})",
+                base_area_acres=base_area_acres[-1],
+                polygon_projected=projected,
+                polygon_wgs84=polygon_wgs84,
+            )
+        )
+
+    average_area_acres = sum(base_area_acres) / len(base_area_acres)
+    area_variance_pct = 0.0
+    if average_area_acres > 0:
+        area_variance_pct = (
+            max(abs(area - average_area_acres) for area in base_area_acres)
+            / average_area_acres
+            * 100.0
+        )
+
+    diagnostics = NaturalSplitDiagnostics(
+        selected_split_direction_deg=None,
+        section_count=section_count,
+        area_min_acres=min(base_area_acres),
+        area_max_acres=max(base_area_acres),
+        area_average_acres=average_area_acres,
+        area_variance_pct=area_variance_pct,
+        split_strategy=_format_split_strategy(split_angles),
+    )
+    return sections, diagnostics
+
+
+def _recursive_section_output_polygon(
+    parent_polygon: Polygon,
+    base_part: Polygon,
+    overlap_m: float,
+) -> Polygon:
+    if overlap_m <= 0:
+        return _require_single_exterior_polygon(
+            fill_polygon_interiors(base_part),
+            "Connected fallback produced a disconnected section.",
+        )
+
+    expanded = buffer_projected_geometry(
+        base_part,
+        overlap_m / 2.0,
+        join_style=BUFFER_JOIN_STYLE,
+        mitre_limit=BUFFER_MITRE_LIMIT,
+    )
+    return _require_single_exterior_polygon(
+        fill_polygon_interiors(expanded.intersection(parent_polygon)),
+        "Connected fallback overlap produced a disconnected section.",
+    )
 
 
 def _simplify_vector_output_polygon(

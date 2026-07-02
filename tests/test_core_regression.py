@@ -30,7 +30,7 @@ from jpg_boundary_kmz_core import (  # noqa: E402
     save_kmz,
     _strict_single_polygon,
 )
-from natural_sectioning import build_natural_sections  # noqa: E402
+from natural_sectioning import NaturalSplitError, build_natural_sections  # noqa: E402
 from outline_strategies import OUTLINE_MODE_CONCAVE  # noqa: E402
 
 
@@ -451,6 +451,43 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(kml_text.count("<Polygon"), 2)
             self.assertNotIn("innerBoundaryIs", kml_text)
 
+    def test_polygon_kmz_auto_sections_fall_back_to_recursive_connected_split(self) -> None:
+        parent = _elevon_like_projected_parent()
+        with self.assertRaises(NaturalSplitError):
+            build_natural_sections(
+                parent,
+                10,
+                50.0 * 0.3048,
+                "Elevon",
+                Transformer.from_crs(3857, 3857, always_xy=True),
+                split_direction_deg=None,
+                densify_sections=False,
+            )
+
+        with TemporaryDirectory() as tmp:
+            kmz_path = Path(tmp) / "elevon_like.kmz"
+            _write_test_kmz(kmz_path, body=_projected_polygon_kml_body(parent))
+
+            result = generate_boundary_from_input(
+                kmz_path,
+                buffer_ft=0.0,
+                section_count=10,
+                overlap_ft=50.0,
+                shape_label="Elevon",
+                split_direction_deg=None,
+                generation_profile=GENERATION_PROFILE_PREVIEW,
+            )
+
+        self.assertEqual(len(result.sections), 10)
+        self.assertEqual(result.metadata.input_type, "KMZ polygon")
+        self.assertIn("Auto connected equal-area", result.metadata.split_strategy)
+        self.assertIsNone(result.metadata.selected_split_direction_deg)
+        self.assertLessEqual(result.metadata.split_area_variance_pct, 0.01)
+        for section in result.sections:
+            self.assertEqual(section.display_name, f"Elevon ({section.index} of 10)")
+            self.assertTrue(section.polygon_projected.is_valid)
+            self.assertEqual(len(section.polygon_projected.interiors), 0)
+
     def test_unknown_outline_mode_raises_boundary_error(self) -> None:
         with TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -626,6 +663,80 @@ def _auto_retry_corridor_projected_parent() -> Polygon:
             (x_offset + 6000, y_offset + 3000),
         ]
     ).buffer(100, cap_style="flat", join_style="mitre")
+
+
+def _elevon_like_projected_parent() -> Polygon:
+    return Polygon(
+        [
+            (740578.2785485019, 3657276.734508307),
+            (740543.2265492795, 3657174.1938875355),
+            (740440.2998483776, 3657107.0072762445),
+            (740414.048488486, 3657038.141530687),
+            (740368.365597078, 3657009.233901303),
+            (740278.9462869853, 3656998.1346497918),
+            (740114.6932378816, 3657020.160649015),
+            (740082.8598346503, 3657043.7332881493),
+            (740036.1581446131, 3657421.7985511124),
+            (739148.1075686364, 3657137.216196941),
+            (739113.1606973477, 3657139.6718816655),
+            (739083.6533513693, 3657184.6516223387),
+            (739090.6164225528, 3657941.860588608),
+            (739129.3627916266, 3657982.0028616805),
+            (739348.2951142194, 3657982.044540039),
+            (739389.1589479134, 3658006.7614384512),
+            (740029.4009488369, 3657989.399388557),
+            (740062.4276658338, 3657953.9885697374),
+            (740126.4967698716, 3657592.0103452513),
+            (740576.2539884133, 3657721.8671521246),
+            (740584.3024851172, 3658293.524694843),
+            (740626.3597449723, 3658330.5688985866),
+            (740852.5828532177, 3658327.348940606),
+            (740878.2214802892, 3659025.3088657013),
+            (740915.117289514, 3659069.543801735),
+            (741462.9341661165, 3659056.95759068),
+            (741499.789245071, 3659037.928409264),
+            (741518.4407594701, 3659063.962519228),
+            (741549.615129691, 3659073.438155178),
+            (741722.609304006, 3659058.85219365),
+            (741754.7077143717, 3659039.691383985),
+            (741784.0265487153, 3658499.3491066145),
+            (741721.5279347416, 3658382.1768521713),
+            (741709.6426218947, 3658324.227596481),
+            (741764.9294559546, 3658313.365590721),
+            (741817.1410172447, 3658235.191837204),
+            (741809.1766970268, 3657898.324021027),
+            (743630.6752526576, 3658174.1414192813),
+            (743664.5969350551, 3658166.285507786),
+            (743685.6135138081, 3658137.0975693814),
+            (743668.2355192639, 3656573.060631179),
+            (743623.6322271723, 3656542.5759945405),
+            (742678.6412409012, 3656535.124749036),
+            (742678.0970207443, 3655755.0408131997),
+            (742623.8549604833, 3655628.562802689),
+            (742593.5572991936, 3655605.135130498),
+            (742402.2822419485, 3655604.4590563355),
+            (742231.4766899262, 3655678.0161680044),
+            (741576.0444247085, 3655680.785439517),
+            (741546.62448982, 3655719.601402635),
+            (741554.3706811109, 3655833.315440783),
+            (741522.4354107179, 3655874.5703753936),
+            (741528.9693392839, 3656090.602283642),
+            (741199.9542193864, 3656097.13236949),
+            (741191.1001749987, 3655791.791291353),
+            (741158.8946716781, 3655751.0703841117),
+            (740695.3452741973, 3655763.5268161884),
+            (740666.0046435593, 3655775.216428569),
+            (740648.0592674671, 3655813.1095454474),
+            (740659.7872819789, 3656622.5464156843),
+            (740703.8804165701, 3656658.636306041),
+            (741149.6520165637, 3656663.20119695),
+            (741163.2617790209, 3657480.8744315812),
+            (740966.7487864748, 3657492.9504395933),
+            (740761.7068907617, 3657338.358741389),
+            (740703.427461543, 3657329.676723441),
+            (740578.2785485019, 3657276.734508307),
+        ]
+    )
 
 
 def _projected_polygon_kml_body(polygon: Polygon, epsg: int = 32615) -> str:
