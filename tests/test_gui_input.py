@@ -11,7 +11,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from jpg_boundary_kmz_core import BoundaryError  # noqa: E402
+from jpg_boundary_kmz_core import (  # noqa: E402
+    BoundaryError,
+    GENERATION_PROFILE_EXPORT,
+    GENERATION_PROFILE_PREVIEW,
+)
 from jpg_boundary_kmz_gui import BoundaryKmzApp, _create_root  # noqa: E402
 
 
@@ -88,6 +92,34 @@ class GuiInputTests(TestCase):
             )
 
             self.assertEqual(source_polygon_key, source_linework_key)
+
+    def test_settings_key_includes_generation_profile(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.kmz"
+            path.write_text("placeholder", encoding="utf-8")
+
+            preview_key = BoundaryKmzApp._settings_key(
+                path,
+                0.0,
+                2,
+                50.0,
+                "Shape",
+                "source_polygon",
+                None,
+                GENERATION_PROFILE_PREVIEW,
+            )
+            export_key = BoundaryKmzApp._settings_key(
+                path,
+                0.0,
+                2,
+                50.0,
+                "Shape",
+                "source_polygon",
+                None,
+                GENERATION_PROFILE_EXPORT,
+            )
+
+            self.assertNotEqual(preview_key, export_key)
 
     def test_vector_input_disables_outline_mode(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:

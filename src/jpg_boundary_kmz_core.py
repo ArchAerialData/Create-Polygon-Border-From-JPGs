@@ -53,7 +53,9 @@ ACRES_PER_SQUARE_METER = 0.000247105381467
 KML_LINE_WIDTH = 6.0
 VECTOR_SIMPLIFY_MAX_DEVIATION_FT = 5.0
 VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO = 0.01
-VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 32
+VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 14
+GENERATION_PROFILE_EXPORT = "export"
+GENERATION_PROFILE_PREVIEW = "preview"
 
 
 class BoundaryError(RuntimeError):
@@ -113,6 +115,7 @@ class BoundaryMetadata:
     vector_simplification_tolerance_ft: float = 0.0
     vector_simplification_max_deviation_ft: float = 0.0
     vector_simplification_area_delta_pct: float = 0.0
+    generation_profile: str = GENERATION_PROFILE_EXPORT
 
 
 @dataclass(frozen=True)
@@ -341,6 +344,7 @@ def generate_boundary_from_input(
     shape_label: str = "",
     outline_mode: str = OUTLINE_MODE_AUTO,
     split_direction_deg: float | None = None,
+    generation_profile: str = GENERATION_PROFILE_EXPORT,
 ) -> BoundaryResult:
     input_path = Path(input_path)
     if input_path.is_dir():
@@ -353,6 +357,7 @@ def generate_boundary_from_input(
             outline_mode=outline_mode,
             split_direction_deg=split_direction_deg,
         )
+    generation_profile = _validate_generation_profile(generation_profile)
     if input_path.is_file() and input_path.suffix.lower() == ".kmz":
         return generate_boundary_from_kmz(
             input_path,
@@ -361,6 +366,7 @@ def generate_boundary_from_input(
             overlap_ft=overlap_ft,
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
+            generation_profile=generation_profile,
         )
     if input_path.is_file() and input_path.suffix.lower() == ".kml":
         return generate_boundary_from_vector_file(
@@ -370,6 +376,7 @@ def generate_boundary_from_input(
             overlap_ft=overlap_ft,
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
+            generation_profile=generation_profile,
         )
     raise BoundaryError("Choose a folder of JPGs, KML file, or KMZ file.")
 
@@ -381,6 +388,7 @@ def generate_boundary_from_kmz(
     overlap_ft: float = 50.0,
     shape_label: str = "",
     split_direction_deg: float | None = None,
+    generation_profile: str = GENERATION_PROFILE_EXPORT,
 ) -> BoundaryResult:
     kmz_path = Path(kmz_path)
     if kmz_path.suffix.lower() != ".kmz":
@@ -392,6 +400,7 @@ def generate_boundary_from_kmz(
         overlap_ft=overlap_ft,
         shape_label=shape_label,
         split_direction_deg=split_direction_deg,
+        generation_profile=generation_profile,
     )
 
 
@@ -402,6 +411,7 @@ def generate_boundary_from_vector_file(
     overlap_ft: float = 50.0,
     shape_label: str = "",
     split_direction_deg: float | None = None,
+    generation_profile: str = GENERATION_PROFILE_EXPORT,
 ) -> BoundaryResult:
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
@@ -409,6 +419,7 @@ def generate_boundary_from_vector_file(
         raise BoundaryError(f"# of Shapes must be between 1 and {MAX_SECTION_COUNT}.")
     if overlap_ft < 0:
         raise BoundaryError("Overlap distance must be 0 or greater.")
+    generation_profile = _validate_generation_profile(generation_profile)
 
     vector_path = Path(vector_path)
     try:
@@ -424,6 +435,7 @@ def generate_boundary_from_vector_file(
             overlap_ft=overlap_ft,
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
+            generation_profile=generation_profile,
         )
     return _generate_boundary_from_polygon_vector(
         vector_geometry,
@@ -432,6 +444,7 @@ def generate_boundary_from_vector_file(
         overlap_ft=overlap_ft,
         shape_label=shape_label,
         split_direction_deg=split_direction_deg,
+        generation_profile=generation_profile,
     )
 
 
@@ -443,6 +456,7 @@ def _generate_boundary_from_polygon_vector(
     overlap_ft: float,
     shape_label: str,
     split_direction_deg: float | None,
+    generation_profile: str,
 ) -> BoundaryResult:
     source_polygon_wgs84 = _ensure_polygon(
         fill_polygon_interiors(vector_geometry.polygons_wgs84[0])
@@ -486,6 +500,7 @@ def _generate_boundary_from_polygon_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
+    export_quality = generation_profile == GENERATION_PROFILE_EXPORT
     simplification_stats = VectorSimplificationStats(
         before_vertices=_polygon_vertex_count(final_projected),
         after_vertices=_polygon_vertex_count(final_projected),
@@ -499,8 +514,15 @@ def _generate_boundary_from_polygon_vector(
             section_label,
             to_wgs84,
             split_direction_deg=split_direction_deg,
+            densify_sections=False,
         )
-        sections, simplification_stats = _simplify_vector_sections(sections, to_wgs84)
+        if export_quality:
+            sections, simplification_stats = _simplify_vector_sections(
+                sections,
+                to_wgs84,
+            )
+        else:
+            simplification_stats = _unsimplified_vector_section_stats(sections)
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
@@ -509,9 +531,10 @@ def _generate_boundary_from_polygon_vector(
         split_area_variance_pct = split_diagnostics.area_variance_pct
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     else:
-        final_projected, simplification_stats = _simplify_vector_output_polygon(
-            final_projected
-        )
+        if export_quality:
+            final_projected, simplification_stats = _simplify_vector_output_polygon(
+                final_projected
+            )
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
@@ -558,6 +581,7 @@ def _generate_boundary_from_polygon_vector(
         vector_simplification_area_delta_pct=(
             simplification_stats.area_delta_ratio * 100.0
         ),
+        generation_profile=generation_profile,
     )
 
     return BoundaryResult(
@@ -579,6 +603,7 @@ def _generate_boundary_from_polyline_vector(
     overlap_ft: float,
     shape_label: str,
     split_direction_deg: float | None,
+    generation_profile: str,
 ) -> BoundaryResult:
     try:
         line_boundary = build_polyline_boundary(vector_geometry.lines_wgs84, buffer_ft)
@@ -602,6 +627,7 @@ def _generate_boundary_from_polyline_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
+    export_quality = generation_profile == GENERATION_PROFILE_EXPORT
     simplification_stats = VectorSimplificationStats(
         before_vertices=_polygon_vertex_count(final_projected),
         after_vertices=_polygon_vertex_count(final_projected),
@@ -616,8 +642,15 @@ def _generate_boundary_from_polyline_vector(
             to_wgs84,
             split_direction_deg=split_direction_deg,
             axis_hint_deg=line_boundary.source_axis_hint_deg,
+            densify_sections=False,
         )
-        sections, simplification_stats = _simplify_vector_sections(sections, to_wgs84)
+        if export_quality:
+            sections, simplification_stats = _simplify_vector_sections(
+                sections,
+                to_wgs84,
+            )
+        else:
+            simplification_stats = _unsimplified_vector_section_stats(sections)
         base_areas = [section.base_area_acres for section in sections]
         section_area_min_acres = min(base_areas)
         section_area_max_acres = max(base_areas)
@@ -626,9 +659,10 @@ def _generate_boundary_from_polyline_vector(
         split_area_variance_pct = split_diagnostics.area_variance_pct
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     else:
-        final_projected, simplification_stats = _simplify_vector_output_polygon(
-            final_projected
-        )
+        if export_quality:
+            final_projected, simplification_stats = _simplify_vector_output_polygon(
+                final_projected
+            )
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
@@ -679,6 +713,7 @@ def _generate_boundary_from_polyline_vector(
         vector_simplification_area_delta_pct=(
             simplification_stats.area_delta_ratio * 100.0
         ),
+        generation_profile=generation_profile,
     )
 
     return BoundaryResult(
@@ -704,6 +739,10 @@ def detect_utm_epsg(lats: np.ndarray, lons: np.ndarray) -> int:
 
 
 def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
+    if result.metadata.generation_profile != GENERATION_PROFILE_EXPORT:
+        raise BoundaryError(
+            "Preview-quality boundaries must be regenerated before KMZ export."
+        )
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".kmz":
         output_path = output_path.with_suffix(".kmz")
@@ -832,6 +871,7 @@ def _build_sections(
     *,
     split_direction_deg: float | None = None,
     axis_hint_deg: float | None = None,
+    densify_sections: bool = True,
 ):
     try:
         natural_sections, diagnostics = build_natural_sections(
@@ -842,6 +882,7 @@ def _build_sections(
             to_wgs84,
             split_direction_deg=split_direction_deg,
             axis_hint_deg=axis_hint_deg,
+            densify_sections=densify_sections,
         )
     except NaturalSplitError as exc:
         raise BoundaryError(str(exc)) from exc
@@ -881,6 +922,16 @@ def _simplify_vector_output_polygon(
     best_area_delta_ratio = 0.0
     low = 0.0
     high = max_deviation_m
+    candidate_result = _evaluate_vector_simplification_candidate(
+        original,
+        high,
+        before_vertices,
+        max_deviation_m,
+        max_area_delta_ratio,
+    )
+    if candidate_result is not None:
+        return candidate_result
+    high = max_deviation_m
 
     for _index in range(VECTOR_SIMPLIFY_SEARCH_ITERATIONS):
         tolerance_m = (low + high) / 2.0
@@ -889,6 +940,11 @@ def _simplify_vector_output_polygon(
         )
         if candidate is None:
             high = tolerance_m
+            continue
+
+        after_vertices = _polygon_vertex_count(candidate)
+        if after_vertices >= before_vertices:
+            low = tolerance_m
             continue
 
         deviation_m = float(original.hausdorff_distance(candidate))
@@ -943,6 +999,51 @@ def _simplify_vector_sections(
     return simplified_sections, _combine_vector_simplification_stats(stats)
 
 
+def _unsimplified_vector_section_stats(
+    sections: list[BoundarySection],
+) -> VectorSimplificationStats:
+    vertex_count = sum(
+        _polygon_vertex_count(section.polygon_projected) for section in sections
+    )
+    return VectorSimplificationStats(
+        before_vertices=vertex_count,
+        after_vertices=vertex_count,
+    )
+
+
+def _evaluate_vector_simplification_candidate(
+    original: Polygon,
+    tolerance_m: float,
+    before_vertices: int,
+    max_deviation_m: float,
+    max_area_delta_ratio: float,
+) -> tuple[Polygon, VectorSimplificationStats] | None:
+    candidate = _strict_vector_simplification_candidate(
+        original.simplify(tolerance_m, preserve_topology=True)
+    )
+    if candidate is None:
+        return None
+    after_vertices = _polygon_vertex_count(candidate)
+    if after_vertices >= before_vertices:
+        return None
+
+    deviation_m = float(original.hausdorff_distance(candidate))
+    area_delta_ratio = _polygon_area_delta_ratio(original, candidate)
+    if (
+        deviation_m > max_deviation_m + 1e-9
+        or area_delta_ratio > max_area_delta_ratio + 1e-9
+    ):
+        return None
+
+    return candidate, VectorSimplificationStats(
+        before_vertices=before_vertices,
+        after_vertices=after_vertices,
+        tolerance_m=tolerance_m,
+        max_deviation_m=deviation_m,
+        area_delta_ratio=area_delta_ratio,
+    )
+
+
 def _combine_vector_simplification_stats(
     stats: list[VectorSimplificationStats],
 ) -> VectorSimplificationStats:
@@ -955,6 +1056,15 @@ def _combine_vector_simplification_stats(
         max_deviation_m=max(item.max_deviation_m for item in stats),
         area_delta_ratio=max(item.area_delta_ratio for item in stats),
     )
+
+
+def _validate_generation_profile(generation_profile: str) -> str:
+    if generation_profile in {
+        GENERATION_PROFILE_EXPORT,
+        GENERATION_PROFILE_PREVIEW,
+    }:
+        return generation_profile
+    raise BoundaryError(f"Unknown generation profile: {generation_profile}")
 
 
 def _project_polygon_to_wgs84(polygon: Polygon, to_wgs84: Transformer) -> Polygon:

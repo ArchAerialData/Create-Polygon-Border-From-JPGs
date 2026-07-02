@@ -24,6 +24,8 @@ except ImportError:
 from jpg_boundary_kmz_core import (
     BoundaryError,
     BoundaryResult,
+    GENERATION_PROFILE_EXPORT,
+    GENERATION_PROFILE_PREVIEW,
     MAX_SECTION_COUNT,
     format_summary,
     generate_boundary_from_input,
@@ -48,6 +50,7 @@ OUTLINE_MODE_LABELS = {
 }
 OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
 PREVIEW_SCROLL_ZOOM_FACTOR = 1.2
+PREVIEW_MAX_PLOT_POINTS = 2500
 SPLIT_DIRECTION_OPTIONS = (
     "Auto",
     "0 deg / East-West",
@@ -81,7 +84,9 @@ class BoundaryKmzApp:
 
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cached_result: BoundaryResult | None = None
-        self._cached_settings: tuple[str, float, int, float, str, str, str] | None = None
+        self._cached_settings: (
+            tuple[str, float, int, float, str, str, str, str] | None
+        ) = None
         self._busy = False
         self._preview_pan_start: tuple[
             float,
@@ -805,6 +810,7 @@ class BoundaryKmzApp:
             shape_label,
             outline_mode,
             split_direction_deg,
+            GENERATION_PROFILE_EXPORT,
         )
         cached_result = (
             self._cached_result if self._cached_settings == settings else None
@@ -847,6 +853,7 @@ class BoundaryKmzApp:
                 shape_label=shape_label,
                 outline_mode=outline_mode,
                 split_direction_deg=split_direction_deg,
+                generation_profile=GENERATION_PROFILE_PREVIEW,
             )
         except Exception as error:
             self._queue.put(("error", error))
@@ -874,6 +881,7 @@ class BoundaryKmzApp:
                 shape_label=shape_label,
                 outline_mode=outline_mode,
                 split_direction_deg=split_direction_deg,
+                generation_profile=GENERATION_PROFILE_EXPORT,
             )
             saved_path = save_kmz(result, output_path)
         except Exception as error:
@@ -900,6 +908,7 @@ class BoundaryKmzApp:
                     result.metadata.shape_label,
                     result.metadata.outline_mode,
                     result.metadata.requested_split_direction_deg,
+                    result.metadata.generation_profile,
                 )
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
@@ -917,6 +926,7 @@ class BoundaryKmzApp:
                     result.metadata.shape_label,
                     result.metadata.outline_mode,
                     result.metadata.requested_split_direction_deg,
+                    result.metadata.generation_profile,
                 )
                 self._write_status(
                     format_summary(result.metadata)
@@ -1091,7 +1101,7 @@ class BoundaryKmzApp:
                 label="JPG GPS points",
             )
         else:
-            bx, by = result.base_polygon_projected.exterior.xy
+            bx, by = self._preview_polygon_xy(result.base_polygon_projected)
             source_label = (
                 "Buffered source LineStrings"
                 if "polyline" in result.metadata.input_type.lower()
@@ -1107,7 +1117,7 @@ class BoundaryKmzApp:
             )
 
         if result.sections:
-            x, y = result.final_polygon_projected.exterior.xy
+            x, y = self._preview_polygon_xy(result.final_polygon_projected)
             self.axes.plot(
                 x,
                 y,
@@ -1130,7 +1140,7 @@ class BoundaryKmzApp:
             ]
             for section in result.sections:
                 color = section_colors[(section.index - 1) % len(section_colors)]
-                sx, sy = section.polygon_projected.exterior.xy
+                sx, sy = self._preview_polygon_xy(section.polygon_projected)
                 self.axes.plot(
                     sx,
                     sy,
@@ -1140,7 +1150,7 @@ class BoundaryKmzApp:
                 )
                 self.axes.fill(sx, sy, color=color, alpha=0.08)
         else:
-            x, y = result.final_polygon_projected.exterior.xy
+            x, y = self._preview_polygon_xy(result.final_polygon_projected)
             self.axes.plot(x, y, color="#d62728", linewidth=2.0, label="KMZ boundary")
             self.axes.fill(x, y, color="#d62728", alpha=0.08)
 
@@ -1158,6 +1168,22 @@ class BoundaryKmzApp:
         self.axes.grid(True, linewidth=0.3, alpha=0.35)
         self.figure.tight_layout(rect=(0.0, 0.0, 0.72, 1.0))
         self.canvas.draw_idle()
+
+    @staticmethod
+    def _preview_polygon_xy(polygon) -> tuple[list[float], list[float]]:
+        x_values, y_values = polygon.exterior.xy
+        x_list = list(x_values)
+        y_list = list(y_values)
+        if len(x_list) <= PREVIEW_MAX_PLOT_POINTS:
+            return x_list, y_list
+
+        step = max(1, math.ceil((len(x_list) - 1) / (PREVIEW_MAX_PLOT_POINTS - 1)))
+        decimated_x = x_list[::step]
+        decimated_y = y_list[::step]
+        if decimated_x[-1] != x_list[-1] or decimated_y[-1] != y_list[-1]:
+            decimated_x.append(x_list[-1])
+            decimated_y.append(y_list[-1])
+        return decimated_x, decimated_y
 
     def _draw_empty_preview(self) -> None:
         self.axes.clear()
@@ -1318,7 +1344,8 @@ class BoundaryKmzApp:
         shape_label: str,
         outline_mode: str,
         split_direction_deg: float | None,
-    ) -> tuple[str, float, int, float, str, str, str]:
+        generation_profile: str = GENERATION_PROFILE_EXPORT,
+    ) -> tuple[str, float, int, float, str, str, str, str]:
         return (
             str(Path(input_path).resolve()).lower(),
             float(buffer_ft),
@@ -1326,7 +1353,12 @@ class BoundaryKmzApp:
             float(overlap_ft),
             shape_label.strip(),
             BoundaryKmzApp._settings_outline_key(outline_mode),
-            "auto" if split_direction_deg is None else f"{float(split_direction_deg) % 180.0:.6f}",
+            (
+                "auto"
+                if split_direction_deg is None
+                else f"{float(split_direction_deg) % 180.0:.6f}"
+            ),
+            generation_profile,
         )
 
     @staticmethod

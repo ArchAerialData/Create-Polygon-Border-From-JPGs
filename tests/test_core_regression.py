@@ -21,6 +21,8 @@ if str(SRC) not in sys.path:
 
 from jpg_boundary_kmz_core import (  # noqa: E402
     BoundaryError,
+    GENERATION_PROFILE_EXPORT,
+    GENERATION_PROFILE_PREVIEW,
     format_summary,
     generate_boundary,
     generate_boundary_from_input,
@@ -207,6 +209,80 @@ class CoreRegressionTests(TestCase):
                 )
 
             save_kmz(result, output_path)
+            with zipfile.ZipFile(output_path) as archive:
+                kml_text = archive.read("doc.kml").decode("utf-8")
+            self.assertEqual(kml_text.count("<Polygon"), 3)
+            self.assertNotIn("innerBoundaryIs", kml_text)
+
+    def test_vector_preview_profile_skips_export_simplification(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "dense_polygon.kml"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            result = generate_boundary_from_input(
+                kml_path,
+                buffer_ft=0.0,
+                section_count=3,
+                overlap_ft=0.0,
+                shape_label="Crop",
+                split_direction_deg=90.0,
+                generation_profile=GENERATION_PROFILE_PREVIEW,
+            )
+
+            self.assertEqual(
+                result.metadata.generation_profile,
+                GENERATION_PROFILE_PREVIEW,
+            )
+            self.assertEqual(len(result.sections), 3)
+            self.assertEqual(
+                result.metadata.vector_simplification_before_vertices,
+                result.metadata.vector_simplification_after_vertices,
+            )
+            self.assertTrue(
+                all(section.polygon_projected.is_valid for section in result.sections)
+            )
+            with self.assertRaisesRegex(BoundaryError, "Preview-quality"):
+                save_kmz(result, Path(tmp) / "preview_output.kmz")
+
+    def test_export_profile_after_preview_still_simplifies_and_saves(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kml_path = tmp_path / "dense_polygon.kml"
+            output_path = tmp_path / "export_output.kmz"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            preview_result = generate_boundary_from_input(
+                kml_path,
+                buffer_ft=0.0,
+                section_count=3,
+                overlap_ft=0.0,
+                shape_label="Crop",
+                split_direction_deg=90.0,
+                generation_profile=GENERATION_PROFILE_PREVIEW,
+            )
+            export_result = generate_boundary_from_input(
+                kml_path,
+                buffer_ft=0.0,
+                section_count=3,
+                overlap_ft=0.0,
+                shape_label="Crop",
+                split_direction_deg=90.0,
+                generation_profile=GENERATION_PROFILE_EXPORT,
+            )
+
+            self.assertEqual(
+                preview_result.metadata.generation_profile,
+                GENERATION_PROFILE_PREVIEW,
+            )
+            self.assertEqual(
+                export_result.metadata.generation_profile,
+                GENERATION_PROFILE_EXPORT,
+            )
+            self.assertLess(
+                export_result.metadata.vector_simplification_after_vertices,
+                export_result.metadata.vector_simplification_before_vertices,
+            )
+            save_kmz(export_result, output_path)
             with zipfile.ZipFile(output_path) as archive:
                 kml_text = archive.read("doc.kml").decode("utf-8")
             self.assertEqual(kml_text.count("<Polygon"), 3)

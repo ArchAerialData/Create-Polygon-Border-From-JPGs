@@ -63,6 +63,7 @@ def build_natural_sections(
     split_direction_deg: float | None = None,
     axis_hint_deg: float | None = None,
     max_area_variance_ratio: float = 0.20,
+    densify_sections: bool = True,
 ) -> tuple[list[NaturalSection], NaturalSplitDiagnostics]:
     if section_count < 1:
         raise NaturalSplitError("Section count must be at least 1.")
@@ -90,10 +91,11 @@ def build_natural_sections(
             rotate(output_part, direction, origin=candidate.center, use_radians=False),
             "Natural split produced a disconnected section after rotation.",
         )
-        projected = _strict_single_polygon(
-            densify_projected_geometry(projected),
-            "Natural split section could not be densified.",
-        )
+        if densify_sections:
+            projected = _strict_single_polygon(
+                densify_projected_geometry(projected),
+                "Natural split section could not be densified.",
+            )
         polygon_wgs84 = transform_geometry(
             lambda x, y, z=None: to_wgs84.transform(x, y),
             projected,
