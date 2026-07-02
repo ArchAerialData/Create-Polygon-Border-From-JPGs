@@ -244,6 +244,18 @@ class CoreRegressionTests(TestCase):
             with self.assertRaisesRegex(BoundaryError, "Preview-quality"):
                 save_kmz(result, Path(tmp) / "preview_output.kmz")
 
+    def test_invalid_generation_profile_is_rejected_for_vector_input(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "dense_polygon.kml"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            with self.assertRaisesRegex(BoundaryError, "Unknown generation profile"):
+                generate_boundary_from_input(
+                    kml_path,
+                    buffer_ft=0.0,
+                    generation_profile="fast",
+                )
+
     def test_export_profile_after_preview_still_simplifies_and_saves(self) -> None:
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

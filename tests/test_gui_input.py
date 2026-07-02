@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
+
+import numpy as np
+from shapely.geometry import Polygon
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -13,10 +17,16 @@ if str(SRC) not in sys.path:
 
 from jpg_boundary_kmz_core import (  # noqa: E402
     BoundaryError,
+    BoundaryMetadata,
+    BoundaryResult,
     GENERATION_PROFILE_EXPORT,
     GENERATION_PROFILE_PREVIEW,
 )
-from jpg_boundary_kmz_gui import BoundaryKmzApp, _create_root  # noqa: E402
+from jpg_boundary_kmz_gui import (  # noqa: E402
+    BoundaryKmzApp,
+    PREVIEW_MAX_PLOT_POINTS,
+    _create_root,
+)
 
 
 class GuiInputTests(TestCase):
@@ -144,20 +154,41 @@ class GuiInputTests(TestCase):
         with _app() as app:
             self.assertTrue(hasattr(app, "preview_toolbar"))
             self.assertTrue(app.preview_toolbar.winfo_exists())
+            self.assertTrue(hasattr(app, "expand_preview_button"))
+            self.assertTrue(app.expand_preview_button.winfo_exists())
 
     def test_preview_canvas_and_toolbar_are_gridded(self) -> None:
         with _app() as app:
             canvas_grid = app.canvas_widget.grid_info()
             toolbar_grid = app.preview_toolbar.grid_info()
+            expand_grid = app.expand_preview_button.grid_info()
 
             self.assertEqual(int(canvas_grid["row"]), 0)
             self.assertEqual(int(toolbar_grid["row"]), 1)
+            self.assertEqual(int(expand_grid["row"]), 1)
             self.assertEqual(app.canvas_widget.master, app.preview_toolbar.master)
 
     def test_empty_preview_redraw_remains_safe(self) -> None:
         with _app() as app:
             app._draw_empty_preview()
             app.root.update_idletasks()
+
+    def test_preview_polygon_xy_decimates_large_polygon_and_preserves_closure(self) -> None:
+        coords = [
+            (
+                math.cos(2.0 * math.pi * index / 3000),
+                math.sin(2.0 * math.pi * index / 3000),
+            )
+            for index in range(3000)
+        ]
+        coords.append(coords[0])
+        polygon = Polygon(coords)
+
+        x_values, y_values = BoundaryKmzApp._preview_polygon_xy(polygon)
+
+        self.assertLessEqual(len(x_values), PREVIEW_MAX_PLOT_POINTS)
+        self.assertEqual(len(x_values), len(y_values))
+        self.assertEqual((x_values[0], y_values[0]), (x_values[-1], y_values[-1]))
 
     def test_preview_interaction_callbacks_are_registered(self) -> None:
         with _app() as app:
@@ -218,6 +249,8 @@ class GuiInputTests(TestCase):
                     inaxes=app.axes,
                     xdata=50.0,
                     ydata=50.0,
+                    x=100.0,
+                    y=100.0,
                     button=1,
                 )
             )
@@ -226,6 +259,8 @@ class GuiInputTests(TestCase):
                     inaxes=app.axes,
                     xdata=60.0,
                     ydata=65.0,
+                    x=120.0,
+                    y=130.0,
                 )
             )
             app._on_preview_button_release(SimpleNamespace())
@@ -243,12 +278,153 @@ class GuiInputTests(TestCase):
                         inaxes=app.axes,
                         xdata=50.0,
                         ydata=50.0,
+                        x=100.0,
+                        y=100.0,
                         button=1,
                     )
                 )
                 self.assertIsNone(app._preview_pan_start)
             finally:
                 app.preview_toolbar.zoom()
+
+    def test_preview_left_drag_same_pixel_does_not_accumulate_motion(self) -> None:
+        with _app() as app:
+            app.axes.set_xlim(0.0, 100.0)
+            app.axes.set_ylim(0.0, 100.0)
+            app.canvas.draw()
+
+            app._on_preview_button_press(
+                SimpleNamespace(
+                    inaxes=app.axes,
+                    xdata=50.0,
+                    ydata=50.0,
+                    x=100.0,
+                    y=100.0,
+                    button=1,
+                )
+            )
+            move_event = SimpleNamespace(x=120.0, y=130.0)
+            app._on_preview_mouse_move(move_event)
+            first_xlim = app.axes.get_xlim()
+            first_ylim = app.axes.get_ylim()
+
+            app._on_preview_mouse_move(move_event)
+
+            self.assertEqual(app.axes.get_xlim(), first_xlim)
+            self.assertEqual(app.axes.get_ylim(), first_ylim)
+
+    def test_fullscreen_preview_opens_canvas_toolbar_and_controls(self) -> None:
+        with _app() as app:
+            app.section_count_var.set("2")
+            app.overlap_var.set("75")
+            app.shape_label_var.set("Test Shape")
+
+            app._open_fullscreen_preview()
+
+            self.assertTrue(app._fullscreen_window_exists())
+            self.assertIsNotNone(app._fullscreen_canvas)
+            self.assertIsNotNone(app._fullscreen_toolbar)
+            self.assertIsNotNone(app._fullscreen_apply_button)
+            self.assertEqual(len(app._fullscreen_event_cids), 4)
+            self.assertEqual(app._fullscreen_section_count_var.get(), "2")
+            self.assertEqual(app._fullscreen_overlap_var.get(), "75")
+            self.assertEqual(app._fullscreen_shape_label_var.get(), "Test Shape")
+
+            app._close_fullscreen_preview()
+            self.assertFalse(app._fullscreen_window_exists())
+            self.assertEqual(app._fullscreen_event_cids, [])
+
+    def test_fullscreen_preview_draws_cached_result(self) -> None:
+        with _app() as app:
+            result = _sample_boundary_result()
+            app._cached_result = result
+
+            app._open_fullscreen_preview()
+
+            self.assertTrue(app._fullscreen_window_exists())
+            self.assertGreater(len(app._fullscreen_axes.lines), 0)
+            app._draw_preview(result)
+            self.assertGreater(len(app._fullscreen_axes.lines), 0)
+
+    def test_fullscreen_apply_syncs_controls_and_starts_preview(self) -> None:
+        with TemporaryDirectory() as tmp, _app() as app:
+            app.parent_var.set(str(Path(tmp)))
+            app.buffer_var.set("0")
+            app._open_fullscreen_preview()
+            app._fullscreen_section_count_var.set("3")
+            app._fullscreen_overlap_var.set("25")
+            app._fullscreen_shape_label_var.set("Fullscreen Shape")
+            app._fullscreen_split_direction_var.set("90 deg / North-South")
+
+            captured = {}
+
+            def fake_start_preview(
+                input_path,
+                buffer_ft,
+                section_count,
+                overlap_ft,
+                shape_label,
+                outline_mode,
+                split_direction_deg,
+            ) -> None:
+                captured.update(
+                    input_path=input_path,
+                    buffer_ft=buffer_ft,
+                    section_count=section_count,
+                    overlap_ft=overlap_ft,
+                    shape_label=shape_label,
+                    outline_mode=outline_mode,
+                    split_direction_deg=split_direction_deg,
+                )
+
+            app._start_preview_generation = fake_start_preview
+
+            app._apply_fullscreen_preview()
+
+            self.assertEqual(app.section_count_var.get(), "3")
+            self.assertEqual(app.overlap_var.get(), "25")
+            self.assertEqual(app.shape_label_var.get(), "Fullscreen Shape")
+            self.assertEqual(app.split_direction_var.get(), "90 deg / North-South")
+            self.assertEqual(captured["section_count"], 3)
+            self.assertEqual(captured["overlap_ft"], 25.0)
+            self.assertEqual(captured["shape_label"], "Fullscreen Shape")
+            self.assertEqual(captured["split_direction_deg"], 90.0)
+
+    def test_fullscreen_direct_pan_uses_independent_canvas(self) -> None:
+        with _app() as app:
+            app._open_fullscreen_preview()
+            axes = app._fullscreen_axes
+            canvas = app._fullscreen_canvas
+            toolbar = app._fullscreen_toolbar
+            axes.set_xlim(0.0, 100.0)
+            axes.set_ylim(0.0, 100.0)
+            canvas.draw()
+            before_xlim = axes.get_xlim()
+            before_ylim = axes.get_ylim()
+
+            app._handle_preview_button_press(
+                SimpleNamespace(
+                    inaxes=axes,
+                    xdata=50.0,
+                    ydata=50.0,
+                    x=100.0,
+                    y=100.0,
+                    button=1,
+                ),
+                axes,
+                canvas,
+                toolbar,
+            )
+            app._handle_preview_mouse_move(
+                SimpleNamespace(x=130.0, y=110.0),
+                axes,
+                canvas,
+                toolbar,
+            )
+            app._on_preview_button_release(SimpleNamespace())
+
+            self.assertNotEqual(axes.get_xlim(), before_xlim)
+            self.assertNotEqual(axes.get_ylim(), before_ylim)
 
 
 class _app:
@@ -260,3 +436,47 @@ class _app:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.root.destroy()
+
+
+def _sample_boundary_result() -> BoundaryResult:
+    polygon = Polygon(
+        [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 50.0),
+            (0.0, 50.0),
+            (0.0, 0.0),
+        ]
+    )
+    metadata = BoundaryMetadata(
+        source_folder=Path.cwd(),
+        input_type="KML polygon",
+        jpg_count=0,
+        gps_count=0,
+        skipped_count=0,
+        epsg=32615,
+        crs_name="WGS 84 / UTM zone 15N",
+        buffer_ft=0.0,
+        median_spacing_ft=0.0,
+        smoothing_ft=0.0,
+        containment_padding_ft=0.0,
+        concave_ratio=0.0,
+        vertex_count=5,
+        section_count=1,
+        overlap_ft=0.0,
+        shape_label="",
+        split_strategy="",
+        section_area_min_acres=0.0,
+        section_area_max_acres=0.0,
+        sections_connected=True,
+        generation_profile=GENERATION_PROFILE_PREVIEW,
+    )
+    return BoundaryResult(
+        metadata=metadata,
+        gps_points=[],
+        projected_points=np.empty((0, 2)),
+        base_polygon_projected=polygon,
+        final_polygon_projected=polygon,
+        final_polygon_wgs84=polygon,
+        sections=[],
+    )
