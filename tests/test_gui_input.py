@@ -157,16 +157,22 @@ class GuiInputTests(TestCase):
             self.assertTrue(app.preview_toolbar.winfo_exists())
             self.assertTrue(hasattr(app, "expand_preview_button"))
             self.assertTrue(app.expand_preview_button.winfo_exists())
+            self.assertTrue(app.preview_key_frame.winfo_exists())
+            self.assertTrue(app.preview_key_canvas.winfo_exists())
 
     def test_preview_canvas_and_toolbar_are_gridded(self) -> None:
         with _app() as app:
             canvas_grid = app.canvas_widget.grid_info()
             toolbar_grid = app.preview_toolbar.grid_info()
             expand_grid = app.expand_preview_button.grid_info()
+            key_grid = app.preview_key_frame.grid_info()
 
             self.assertEqual(int(canvas_grid["row"]), 0)
+            self.assertEqual(int(canvas_grid["column"]), 0)
             self.assertEqual(int(toolbar_grid["row"]), 1)
             self.assertEqual(int(expand_grid["row"]), 1)
+            self.assertEqual(int(key_grid["row"]), 0)
+            self.assertEqual(int(key_grid["column"]), 1)
             self.assertEqual(app.canvas_widget.master, app.preview_toolbar.master)
 
     def test_empty_preview_redraw_remains_safe(self) -> None:
@@ -325,6 +331,9 @@ class GuiInputTests(TestCase):
             self.assertTrue(app._fullscreen_window_exists())
             self.assertIsNotNone(app._fullscreen_canvas)
             self.assertIsNotNone(app._fullscreen_toolbar)
+            self.assertIsNotNone(app._fullscreen_key_frame)
+            self.assertIsNotNone(app._fullscreen_key_canvas)
+            self.assertIsNotNone(app._fullscreen_key_content)
             self.assertIsNotNone(app._fullscreen_apply_button)
             self.assertEqual(len(app._fullscreen_event_cids), 4)
             self.assertEqual(app._fullscreen_section_count_var.get(), "2")
@@ -344,8 +353,48 @@ class GuiInputTests(TestCase):
 
             self.assertTrue(app._fullscreen_window_exists())
             self.assertGreater(len(app._fullscreen_axes.lines), 0)
+            self.assertIsNone(app._fullscreen_axes.get_legend())
+            self.assertFalse(app._fullscreen_axes.axison)
+            self.assertGreater(len(app._fullscreen_key_content.winfo_children()), 1)
             app._draw_preview(result)
             self.assertGreater(len(app._fullscreen_axes.lines), 0)
+
+    def test_preview_long_corridor_uses_full_available_axes_extent(self) -> None:
+        with _app() as app:
+            result = _long_corridor_boundary_result()
+
+            app._draw_preview(result)
+            app.canvas.draw()
+
+            xlim = app.axes.get_xlim()
+            ylim = app.axes.get_ylim()
+            self.assertEqual(app.axes.get_aspect(), "auto")
+            self.assertFalse(app.axes.axison)
+            self.assertIsNone(app.axes.get_legend())
+            self.assertGreater(len(app.preview_key_content.winfo_children()), 1)
+            self.assertLess(xlim[0], 0.0)
+            self.assertGreater(xlim[1], 10000.0)
+            self.assertLess(ylim[0], 0.0)
+            self.assertGreater(ylim[1], 100.0)
+
+    def test_fullscreen_long_corridor_uses_full_available_axes_extent(self) -> None:
+        with _app() as app:
+            result = _long_corridor_boundary_result()
+            app._cached_result = result
+
+            app._open_fullscreen_preview()
+            app._fullscreen_canvas.draw()
+
+            xlim = app._fullscreen_axes.get_xlim()
+            ylim = app._fullscreen_axes.get_ylim()
+            self.assertEqual(app._fullscreen_axes.get_aspect(), "auto")
+            self.assertFalse(app._fullscreen_axes.axison)
+            self.assertIsNone(app._fullscreen_axes.get_legend())
+            self.assertGreater(len(app._fullscreen_key_content.winfo_children()), 1)
+            self.assertLess(xlim[0], 0.0)
+            self.assertGreater(xlim[1], 10000.0)
+            self.assertLess(ylim[0], 0.0)
+            self.assertGreater(ylim[1], 100.0)
 
     def test_fullscreen_apply_syncs_controls_and_starts_preview(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
@@ -508,3 +557,25 @@ def _sample_boundary_result() -> BoundaryResult:
         final_polygon_wgs84=polygon,
         sections=[],
     )
+
+
+def _long_corridor_boundary_result() -> BoundaryResult:
+    polygon = Polygon(
+        [
+            (0.0, 0.0),
+            (10000.0, 0.0),
+            (10000.0, 100.0),
+            (0.0, 100.0),
+            (0.0, 0.0),
+        ]
+    )
+    result = _sample_boundary_result()
+    result.metadata = replace(
+        result.metadata,
+        vertex_count=5,
+        section_count=1,
+    )
+    result.base_polygon_projected = polygon
+    result.final_polygon_projected = polygon
+    result.final_polygon_wgs84 = polygon
+    return result

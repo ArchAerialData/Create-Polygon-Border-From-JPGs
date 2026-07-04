@@ -51,6 +51,9 @@ OUTLINE_MODE_LABELS = {
 OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
 PREVIEW_SCROLL_ZOOM_FACTOR = 1.2
 PREVIEW_MAX_PLOT_POINTS = 2500
+PREVIEW_LIMIT_PADDING_RATIO = 0.04
+PREVIEW_KEY_PANEL_WIDTH = 340
+PREVIEW_KEY_WRAP_LENGTH = 270
 SPLIT_DIRECTION_OPTIONS = (
     "Auto",
     "0 deg / East-West",
@@ -105,6 +108,9 @@ class BoundaryKmzApp:
         self._fullscreen_axes: object | None = None
         self._fullscreen_canvas: FigureCanvasTkAgg | None = None
         self._fullscreen_toolbar: NavigationToolbar2Tk | None = None
+        self._fullscreen_key_frame: ttk.LabelFrame | None = None
+        self._fullscreen_key_canvas: tk.Canvas | None = None
+        self._fullscreen_key_content: ttk.Frame | None = None
         self._fullscreen_status_var: tk.StringVar | None = None
         self._fullscreen_section_count_var: tk.StringVar | None = None
         self._fullscreen_overlap_var: tk.StringVar | None = None
@@ -116,6 +122,9 @@ class BoundaryKmzApp:
         self._fullscreen_split_direction_combo: ttk.Combobox | None = None
         self._fullscreen_split_direction_custom_label: ttk.Label | None = None
         self._fullscreen_split_direction_custom_entry: ttk.Entry | None = None
+        self.preview_key_frame: ttk.LabelFrame | None = None
+        self.preview_key_canvas: tk.Canvas | None = None
+        self.preview_key_content: ttk.Frame | None = None
 
         self._build_ui()
         self.output_name_var.trace_add("write", self._on_output_name_changed)
@@ -416,12 +425,19 @@ class BoundaryKmzApp:
         self.canvas = FigureCanvasTkAgg(self.figure, master=preview_frame)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+        (
+            self.preview_key_frame,
+            self.preview_key_canvas,
+            self.preview_key_content,
+        ) = self._create_preview_key_panel(preview_frame)
+        self.preview_key_frame.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         self.preview_toolbar = NavigationToolbar2Tk(
             self.canvas,
             preview_frame,
             pack_toolbar=False,
         )
         self.preview_toolbar.update()
+        self._disable_toolbar_coordinate_message(self.preview_toolbar)
         self.preview_toolbar.grid(row=1, column=0, sticky="ew")
         self.expand_preview_button = ttk.Button(
             preview_frame,
@@ -430,6 +446,53 @@ class BoundaryKmzApp:
         )
         self.expand_preview_button.grid(row=1, column=1, sticky="e", padx=(8, 0))
         self._register_preview_interactions()
+
+    def _create_preview_key_panel(
+        self,
+        parent: tk.Widget,
+    ) -> tuple[ttk.LabelFrame, tk.Canvas, ttk.Frame]:
+        key_frame = ttk.LabelFrame(parent, text="Key")
+        key_frame.columnconfigure(0, weight=1)
+        key_frame.rowconfigure(0, weight=1)
+        key_frame.configure(width=PREVIEW_KEY_PANEL_WIDTH)
+
+        key_canvas = tk.Canvas(
+            key_frame,
+            width=PREVIEW_KEY_PANEL_WIDTH,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        scrollbar = ttk.Scrollbar(
+            key_frame,
+            orient="vertical",
+            command=key_canvas.yview,
+        )
+        key_content = ttk.Frame(key_canvas)
+        key_window = key_canvas.create_window(
+            (0, 0),
+            window=key_content,
+            anchor="nw",
+        )
+        key_canvas.configure(yscrollcommand=scrollbar.set)
+        key_canvas.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(4, 6), pady=6)
+
+        def update_scrollregion(_event: object) -> None:
+            key_canvas.configure(scrollregion=key_canvas.bbox("all"))
+
+        def update_content_width(event: object) -> None:
+            width = max(int(getattr(event, "width", PREVIEW_KEY_PANEL_WIDTH)), 1)
+            key_canvas.itemconfigure(key_window, width=width)
+
+        key_content.bind("<Configure>", update_scrollregion)
+        key_canvas.bind("<Configure>", update_content_width)
+        self._update_preview_key(key_content, [])
+        return key_frame, key_canvas, key_content
+
+    @staticmethod
+    def _disable_toolbar_coordinate_message(toolbar: NavigationToolbar2Tk) -> None:
+        toolbar.set_message("")
+        toolbar.set_message = lambda _message: None
 
     def _register_preview_interactions(self) -> None:
         self._preview_event_cids = self._register_preview_canvas_interactions(
@@ -1286,7 +1349,13 @@ class BoundaryKmzApp:
         )
 
     def _draw_preview(self, result: BoundaryResult) -> None:
-        self._draw_preview_on_axes(result, self.axes, self.figure, self.canvas)
+        self._draw_preview_on_axes(
+            result,
+            self.axes,
+            self.figure,
+            self.canvas,
+            self.preview_key_content,
+        )
         self._draw_fullscreen_preview(result)
 
     def _draw_preview_on_axes(
@@ -1295,8 +1364,10 @@ class BoundaryKmzApp:
         axes: object,
         figure: Figure,
         canvas: FigureCanvasTkAgg | None,
+        key_content: ttk.Frame | None,
     ) -> None:
         axes.clear()
+        key_entries: list[tuple[str, str, str, float]] = []
         if result.metadata.input_type == "JPG folder":
             axes.scatter(
                 result.projected_points[:, 0],
@@ -1306,6 +1377,7 @@ class BoundaryKmzApp:
                 linewidths=0,
                 label="JPG GPS points",
             )
+            key_entries.append(("JPG GPS points", "#1f77b4", "point", 1.0))
         else:
             bx, by = self._preview_polygon_xy(result.base_polygon_projected)
             source_label = (
@@ -1321,6 +1393,7 @@ class BoundaryKmzApp:
                 linestyle=":",
                 label=source_label,
             )
+            key_entries.append((source_label, "#1f77b4", ":", 1.4))
 
         if result.sections:
             x, y = self._preview_polygon_xy(result.final_polygon_projected)
@@ -1332,6 +1405,7 @@ class BoundaryKmzApp:
                 linestyle="--",
                 label="Parent outline",
             )
+            key_entries.append(("Parent outline", "#9ca3af", "--", 1.4))
             section_colors = [
                 "#d62728",
                 "#2ca02c",
@@ -1355,26 +1429,123 @@ class BoundaryKmzApp:
                     label=section.display_name,
                 )
                 axes.fill(sx, sy, color=color, alpha=0.08)
+                key_entries.append((section.display_name, color, "-", 1.8))
         else:
             x, y = self._preview_polygon_xy(result.final_polygon_projected)
             axes.plot(x, y, color="#d62728", linewidth=2.0, label="KMZ boundary")
             axes.fill(x, y, color="#d62728", alpha=0.08)
+            key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
 
-        axes.set_aspect("equal", adjustable="box")
-        axes.set_title("Camera Positions and Export Boundary")
-        axes.set_xlabel("Projected X (meters)")
-        axes.set_ylabel("Projected Y (meters)")
-        axes.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            fontsize="small",
-            ncol=1,
-            borderaxespad=0.0,
-        )
-        axes.grid(True, linewidth=0.3, alpha=0.35)
-        figure.tight_layout(rect=(0.0, 0.0, 0.72, 1.0))
+        self._fit_preview_axes_to_result(result, axes)
+        axes.set_aspect("auto", adjustable="box")
+        axes.set_axis_off()
+        axes.format_coord = lambda _x, _y: ""
+        figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        self._update_preview_key(key_content, key_entries)
         if canvas is not None:
             canvas.draw_idle()
+
+    def _update_preview_key(
+        self,
+        key_content: ttk.Frame | None,
+        entries: list[tuple[str, str, str, float]],
+    ) -> None:
+        if key_content is None:
+            return
+        for child in key_content.winfo_children():
+            child.destroy()
+
+        if not entries:
+            ttk.Label(
+                key_content,
+                text="Key appears after preview.",
+                foreground="#6b7280",
+                wraplength=PREVIEW_KEY_WRAP_LENGTH,
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=6)
+            return
+
+        for row, (label, color, line_style, line_width) in enumerate(entries):
+            swatch = tk.Canvas(
+                key_content,
+                width=42,
+                height=18,
+                highlightthickness=0,
+                borderwidth=0,
+            )
+            if line_style == "point":
+                swatch.create_oval(17, 6, 25, 14, fill=color, outline=color)
+            else:
+                dash = self._preview_key_dash(line_style)
+                line_options: dict[str, object] = {
+                    "fill": color,
+                    "width": max(1, int(round(line_width * 2))),
+                }
+                if dash is not None:
+                    line_options["dash"] = dash
+                swatch.create_line(4, 9, 38, 9, **line_options)
+            swatch.grid(row=row, column=0, sticky="nw", padx=(6, 4), pady=3)
+            ttk.Label(
+                key_content,
+                text=label,
+                wraplength=PREVIEW_KEY_WRAP_LENGTH,
+                justify="left",
+            ).grid(row=row, column=1, sticky="w", padx=(0, 6), pady=3)
+
+    @staticmethod
+    def _preview_key_dash(line_style: str) -> tuple[int, int] | None:
+        if line_style == ":":
+            return (2, 3)
+        if line_style == "--":
+            return (7, 4)
+        return None
+
+    def _fit_preview_axes_to_result(self, result: BoundaryResult, axes: object) -> None:
+        bounds = self._preview_result_bounds(result)
+        if bounds is None:
+            axes.relim()
+            axes.autoscale_view()
+            return
+
+        min_x, min_y, max_x, max_y = bounds
+        width = max(max_x - min_x, 1.0)
+        height = max(max_y - min_y, 1.0)
+        x_padding = width * PREVIEW_LIMIT_PADDING_RATIO
+        y_padding = height * PREVIEW_LIMIT_PADDING_RATIO
+        axes.set_xlim(min_x - x_padding, max_x + x_padding)
+        axes.set_ylim(min_y - y_padding, max_y + y_padding)
+
+    @staticmethod
+    def _preview_result_bounds(
+        result: BoundaryResult,
+    ) -> tuple[float, float, float, float] | None:
+        bounds: list[tuple[float, float, float, float]] = []
+        for polygon in (result.base_polygon_projected, result.final_polygon_projected):
+            if polygon is not None and not polygon.is_empty:
+                bounds.append(tuple(float(value) for value in polygon.bounds))
+        bounds.extend(
+            tuple(float(value) for value in section.polygon_projected.bounds)
+            for section in result.sections
+            if not section.polygon_projected.is_empty
+        )
+        if result.projected_points.size:
+            x_values = result.projected_points[:, 0]
+            y_values = result.projected_points[:, 1]
+            bounds.append(
+                (
+                    float(x_values.min()),
+                    float(y_values.min()),
+                    float(x_values.max()),
+                    float(y_values.max()),
+                )
+            )
+        if not bounds:
+            return None
+        return (
+            min(item[0] for item in bounds),
+            min(item[1] for item in bounds),
+            max(item[2] for item in bounds),
+            max(item[3] for item in bounds),
+        )
 
     @staticmethod
     def _preview_polygon_xy(polygon) -> tuple[list[float], list[float]]:
@@ -1398,6 +1569,7 @@ class BoundaryKmzApp:
             self.figure,
             getattr(self, "canvas", None),
         )
+        self._update_preview_key(getattr(self, "preview_key_content", None), [])
         if (
             self._fullscreen_window_exists()
             and self._fullscreen_axes is not None
@@ -1409,6 +1581,7 @@ class BoundaryKmzApp:
                 self._fullscreen_figure,
                 self._fullscreen_canvas,
             )
+            self._update_preview_key(self._fullscreen_key_content, [])
 
     def _draw_empty_preview_on_axes(
         self,
@@ -1417,11 +1590,18 @@ class BoundaryKmzApp:
         canvas: FigureCanvasTkAgg | None,
     ) -> None:
         axes.clear()
-        axes.set_title("Preview will appear after Scan / Preview")
-        axes.set_xlabel("Projected X (meters)")
-        axes.set_ylabel("Projected Y (meters)")
-        axes.grid(True, linewidth=0.3, alpha=0.35)
-        figure.tight_layout()
+        axes.set_axis_off()
+        axes.format_coord = lambda _x, _y: ""
+        axes.text(
+            0.5,
+            0.5,
+            "Preview will appear after Scan / Preview",
+            ha="center",
+            va="center",
+            transform=axes.transAxes,
+            color="#374151",
+        )
+        figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         if canvas is not None:
             canvas.draw_idle()
 
@@ -1565,6 +1745,7 @@ class BoundaryKmzApp:
         plot_frame = ttk.Frame(window)
         plot_frame.grid(row=1, column=0, sticky="nsew")
         plot_frame.columnconfigure(0, weight=1)
+        plot_frame.columnconfigure(1, weight=0)
         plot_frame.rowconfigure(0, weight=1)
 
         self._fullscreen_figure = Figure(figsize=(12, 8), dpi=100)
@@ -1574,12 +1755,19 @@ class BoundaryKmzApp:
             master=plot_frame,
         )
         self._fullscreen_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        (
+            self._fullscreen_key_frame,
+            self._fullscreen_key_canvas,
+            self._fullscreen_key_content,
+        ) = self._create_preview_key_panel(plot_frame)
+        self._fullscreen_key_frame.grid(row=0, column=1, sticky="ns", padx=(8, 8))
         self._fullscreen_toolbar = NavigationToolbar2Tk(
             self._fullscreen_canvas,
             window,
             pack_toolbar=False,
         )
         self._fullscreen_toolbar.update()
+        self._disable_toolbar_coordinate_message(self._fullscreen_toolbar)
         self._fullscreen_toolbar.grid(row=2, column=0, sticky="ew")
         self._fullscreen_event_cids = self._register_preview_canvas_interactions(
             self._fullscreen_canvas,
@@ -1709,6 +1897,7 @@ class BoundaryKmzApp:
                 self._fullscreen_figure,
                 self._fullscreen_canvas,
             )
+            self._update_preview_key(self._fullscreen_key_content, [])
             return
 
         self._draw_preview_on_axes(
@@ -1716,6 +1905,7 @@ class BoundaryKmzApp:
             self._fullscreen_axes,
             self._fullscreen_figure,
             self._fullscreen_canvas,
+            self._fullscreen_key_content,
         )
 
     def _set_fullscreen_status(self, status: str) -> None:
@@ -1759,6 +1949,9 @@ class BoundaryKmzApp:
         self._fullscreen_axes = None
         self._fullscreen_canvas = None
         self._fullscreen_toolbar = None
+        self._fullscreen_key_frame = None
+        self._fullscreen_key_canvas = None
+        self._fullscreen_key_content = None
         self._fullscreen_status_var = None
         self._fullscreen_section_count_var = None
         self._fullscreen_overlap_var = None
