@@ -1437,7 +1437,7 @@ class BoundaryKmzApp:
             key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
 
         self._fit_preview_axes_to_result(result, axes)
-        axes.set_aspect("auto", adjustable="box")
+        axes.set_aspect("equal", adjustable="box")
         axes.set_axis_off()
         axes.format_coord = lambda _x, _y: ""
         figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)

@@ -359,7 +359,7 @@ class GuiInputTests(TestCase):
             app._draw_preview(result)
             self.assertGreater(len(app._fullscreen_axes.lines), 0)
 
-    def test_preview_long_corridor_uses_full_available_axes_extent(self) -> None:
+    def test_preview_long_corridor_preserves_equal_map_scale(self) -> None:
         with _app() as app:
             result = _long_corridor_boundary_result()
 
@@ -368,7 +368,8 @@ class GuiInputTests(TestCase):
 
             xlim = app.axes.get_xlim()
             ylim = app.axes.get_ylim()
-            self.assertEqual(app.axes.get_aspect(), "auto")
+            self.assertEqual(app.axes.get_aspect(), 1.0)
+            self.assertEqual(app.axes.get_adjustable(), "box")
             self.assertFalse(app.axes.axison)
             self.assertIsNone(app.axes.get_legend())
             self.assertGreater(len(app.preview_key_content.winfo_children()), 1)
@@ -377,7 +378,7 @@ class GuiInputTests(TestCase):
             self.assertLess(ylim[0], 0.0)
             self.assertGreater(ylim[1], 100.0)
 
-    def test_fullscreen_long_corridor_uses_full_available_axes_extent(self) -> None:
+    def test_fullscreen_long_corridor_preserves_equal_map_scale(self) -> None:
         with _app() as app:
             result = _long_corridor_boundary_result()
             app._cached_result = result
@@ -387,7 +388,8 @@ class GuiInputTests(TestCase):
 
             xlim = app._fullscreen_axes.get_xlim()
             ylim = app._fullscreen_axes.get_ylim()
-            self.assertEqual(app._fullscreen_axes.get_aspect(), "auto")
+            self.assertEqual(app._fullscreen_axes.get_aspect(), 1.0)
+            self.assertEqual(app._fullscreen_axes.get_adjustable(), "box")
             self.assertFalse(app._fullscreen_axes.axison)
             self.assertIsNone(app._fullscreen_axes.get_legend())
             self.assertGreater(len(app._fullscreen_key_content.winfo_children()), 1)
