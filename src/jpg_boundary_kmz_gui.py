@@ -79,6 +79,7 @@ class BoundaryKmzApp:
         self.shape_label_var = tk.StringVar(value=self._default_shape_label())
         self.split_direction_var = tk.StringVar(value="Auto")
         self.split_direction_degrees_var = tk.StringVar(value="")
+        self.simplify_vector_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
         self._updating_output_fields = False
         self._updating_shape_label = False
@@ -88,7 +89,7 @@ class BoundaryKmzApp:
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cached_result: BoundaryResult | None = None
         self._cached_settings: (
-            tuple[str, float, int, float, str, str, str, str] | None
+            tuple[str, float, int, float, str, str, str, str, str] | None
         ) = None
         self._busy = False
         self._preview_pan_start: tuple[
@@ -136,6 +137,7 @@ class BoundaryKmzApp:
         self.shape_label_var.trace_add("write", self._on_shape_label_changed)
         self.split_direction_var.trace_add("write", self._on_split_direction_changed)
         self.split_direction_degrees_var.trace_add("write", self._on_split_direction_changed)
+        self.simplify_vector_var.trace_add("write", self._on_vector_simplification_changed)
         self._update_outline_mode_state()
         self._update_section_control_state()
         self.root.after(100, self._drain_queue)
@@ -147,7 +149,7 @@ class BoundaryKmzApp:
         self.root.rowconfigure(0, weight=1)
 
         root_frame.columnconfigure(1, weight=1)
-        root_frame.rowconfigure(8, weight=1)
+        root_frame.rowconfigure(9, weight=1)
 
         ttk.Label(root_frame, text="Input folder, KML, or KMZ").grid(
             row=0,
@@ -269,8 +271,23 @@ class BoundaryKmzApp:
             command=self._view_output_folder,
         ).grid(row=0, column=1, sticky="ew")
 
+        self.simplify_vector_label = ttk.Label(root_frame, text="Vector output")
+        self.simplify_vector_label.grid(
+            row=6,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
+        self.simplify_vector_checkbutton = ttk.Checkbutton(
+            root_frame,
+            text="Simplify KML/KMZ output vertices",
+            variable=self.simplify_vector_var,
+        )
+        self.simplify_vector_checkbutton.grid(row=6, column=1, sticky="w", pady=4)
+
         sections_frame = ttk.LabelFrame(root_frame, text="Sections")
-        sections_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        sections_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         sections_frame.columnconfigure(5, weight=1)
 
         ttk.Label(sections_frame, text="# of Shapes").grid(
@@ -382,7 +399,7 @@ class BoundaryKmzApp:
         self._register_drop_target()
 
         button_frame = ttk.Frame(root_frame)
-        button_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        button_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         button_frame.columnconfigure(3, weight=1)
 
         self.scan_button = ttk.Button(
@@ -414,7 +431,7 @@ class BoundaryKmzApp:
         )
 
         preview_frame = ttk.LabelFrame(root_frame, text="Preview")
-        preview_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        preview_frame.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.columnconfigure(1, weight=0)
         preview_frame.rowconfigure(0, weight=1)
@@ -569,10 +586,12 @@ class BoundaryKmzApp:
         axes.set_xlim(
             xdata - new_width * x_fraction,
             xdata + new_width * (1.0 - x_fraction),
+            auto=True,
         )
         axes.set_ylim(
             ydata - new_height * y_fraction,
             ydata + new_height * (1.0 - y_fraction),
+            auto=True,
         )
         canvas.draw_idle()
 
@@ -661,8 +680,8 @@ class BoundaryKmzApp:
         y_range = start_ylim[1] - start_ylim[0]
         dx = (start_x - event_pixels[0]) * x_range / axes_width
         dy = (start_y - event_pixels[1]) * y_range / axes_height
-        axes.set_xlim(start_xlim[0] + dx, start_xlim[1] + dx)
-        axes.set_ylim(start_ylim[0] + dy, start_ylim[1] + dy)
+        axes.set_xlim(start_xlim[0] + dx, start_xlim[1] + dx, auto=True)
+        axes.set_ylim(start_ylim[0] + dy, start_ylim[1] + dy, auto=True)
         canvas.draw_idle()
 
     def _on_preview_button_release(self, _event: object) -> None:
@@ -907,6 +926,9 @@ class BoundaryKmzApp:
         self._update_section_control_state()
         self._invalidate_cache()
 
+    def _on_vector_simplification_changed(self, *_args: object) -> None:
+        self._invalidate_cache()
+
     def _update_section_control_state(self) -> None:
         enabled = self._current_section_count_for_state() > 1
         state = "normal" if enabled else "disabled"
@@ -933,6 +955,9 @@ class BoundaryKmzApp:
         state = "disabled" if is_vector_file else "readonly"
         self.outline_mode_combo.configure(state=state)
         self.outline_mode_label.configure(state="disabled" if is_vector_file else "normal")
+        simplify_state = "normal" if is_vector_file and not self._busy else "disabled"
+        self.simplify_vector_label.configure(state=simplify_state)
+        self.simplify_vector_checkbutton.configure(state=simplify_state)
 
     def _current_section_count_for_state(self) -> int:
         try:
@@ -961,6 +986,7 @@ class BoundaryKmzApp:
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
                 _,
             ) = (
                 self._read_inputs(require_output=False)
@@ -977,6 +1003,7 @@ class BoundaryKmzApp:
             shape_label,
             outline_mode,
             split_direction_deg,
+            simplify_vector_output,
         )
 
     def _start_preview_generation(
@@ -988,6 +1015,7 @@ class BoundaryKmzApp:
         shape_label: str,
         outline_mode: str,
         split_direction_deg: float | None,
+        simplify_vector_output: bool,
     ) -> None:
         self._set_busy(True, "Reading input and building preview...")
         worker = threading.Thread(
@@ -1000,6 +1028,7 @@ class BoundaryKmzApp:
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
             ),
             daemon=True,
         )
@@ -1015,6 +1044,7 @@ class BoundaryKmzApp:
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
                 output_path,
             ) = self._read_inputs(require_output=True)
         except BoundaryError as error:
@@ -1038,6 +1068,7 @@ class BoundaryKmzApp:
             outline_mode,
             split_direction_deg,
             GENERATION_PROFILE_EXPORT,
+            simplify_vector_output=simplify_vector_output,
         )
         cached_result = (
             self._cached_result if self._cached_settings == settings else None
@@ -1054,6 +1085,7 @@ class BoundaryKmzApp:
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
                 output_path,
                 cached_result,
             ),
@@ -1070,6 +1102,7 @@ class BoundaryKmzApp:
         shape_label: str,
         outline_mode: str,
         split_direction_deg: float | None,
+        simplify_vector_output: bool,
     ) -> None:
         try:
             result = generate_boundary_from_input(
@@ -1081,6 +1114,7 @@ class BoundaryKmzApp:
                 outline_mode=outline_mode,
                 split_direction_deg=split_direction_deg,
                 generation_profile=GENERATION_PROFILE_PREVIEW,
+                simplify_vector_output=simplify_vector_output,
             )
         except Exception as error:
             self._queue.put(("error", error))
@@ -1096,6 +1130,7 @@ class BoundaryKmzApp:
         shape_label: str,
         outline_mode: str,
         split_direction_deg: float | None,
+        simplify_vector_output: bool,
         output_path: Path,
         cached_result: BoundaryResult | None,
     ) -> None:
@@ -1109,6 +1144,7 @@ class BoundaryKmzApp:
                 outline_mode=outline_mode,
                 split_direction_deg=split_direction_deg,
                 generation_profile=GENERATION_PROFILE_EXPORT,
+                simplify_vector_output=simplify_vector_output,
             )
             saved_path = save_kmz(result, output_path)
         except Exception as error:
@@ -1137,6 +1173,7 @@ class BoundaryKmzApp:
                     result.metadata.outline_mode,
                     result.metadata.requested_split_direction_deg,
                     result.metadata.generation_profile,
+                    simplify_vector_output=result.metadata.vector_simplification_enabled,
                 )
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
@@ -1159,6 +1196,7 @@ class BoundaryKmzApp:
                     result.metadata.outline_mode,
                     result.metadata.requested_split_direction_deg,
                     result.metadata.generation_profile,
+                    simplify_vector_output=result.metadata.vector_simplification_enabled,
                 )
                 self._write_status(
                     format_summary(result.metadata)
@@ -1251,7 +1289,7 @@ class BoundaryKmzApp:
         shape_label_text: str | None = None,
         split_direction_label: str | None = None,
         split_direction_degrees_text: str | None = None,
-    ) -> tuple[Path, float, int, float, str, str, float | None, Path | None]:
+    ) -> tuple[Path, float, int, float, str, str, float | None, bool, Path | None]:
         input_text = self.parent_var.get().strip()
         if not input_text:
             raise BoundaryError("Choose a JPG folder, KML file, or KMZ file.")
@@ -1337,6 +1375,11 @@ class BoundaryKmzApp:
             output_path = current_output_path
 
         outline_mode = self._selected_outline_mode(input_path)
+        simplify_vector_output = (
+            self.simplify_vector_var.get()
+            if self._is_vector_file_path(input_path)
+            else False
+        )
         return (
             input_path,
             buffer_ft,
@@ -1345,6 +1388,7 @@ class BoundaryKmzApp:
             shape_label,
             outline_mode,
             split_direction_deg,
+            bool(simplify_vector_output),
             output_path,
         )
 
@@ -1437,7 +1481,7 @@ class BoundaryKmzApp:
             key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
 
         self._fit_preview_axes_to_result(result, axes)
-        axes.set_aspect("equal", adjustable="box")
+        axes.set_aspect("equal", adjustable="datalim")
         axes.set_axis_off()
         axes.format_coord = lambda _x, _y: ""
         figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
@@ -1511,8 +1555,8 @@ class BoundaryKmzApp:
         height = max(max_y - min_y, 1.0)
         x_padding = width * PREVIEW_LIMIT_PADDING_RATIO
         y_padding = height * PREVIEW_LIMIT_PADDING_RATIO
-        axes.set_xlim(min_x - x_padding, max_x + x_padding)
-        axes.set_ylim(min_y - y_padding, max_y + y_padding)
+        axes.set_xlim(min_x - x_padding, max_x + x_padding, auto=True)
+        axes.set_ylim(min_y - y_padding, max_y + y_padding, auto=True)
 
     @staticmethod
     def _preview_result_bounds(
@@ -1801,6 +1845,7 @@ class BoundaryKmzApp:
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
                 _,
             ) = self._read_inputs(
                 require_output=False,
@@ -1839,6 +1884,7 @@ class BoundaryKmzApp:
             shape_label,
             outline_mode,
             split_direction_deg,
+            simplify_vector_output,
         )
 
     def _fullscreen_controls_ready(self) -> bool:
@@ -2023,6 +2069,8 @@ class BoundaryKmzApp:
             self._fullscreen_apply_button.configure(state=state)
         if busy:
             self.outline_mode_combo.configure(state="disabled")
+            self.simplify_vector_label.configure(state="disabled")
+            self.simplify_vector_checkbutton.configure(state="disabled")
         else:
             self._update_outline_mode_state()
         self.status_var.set(status)
@@ -2156,7 +2204,9 @@ class BoundaryKmzApp:
         outline_mode: str,
         split_direction_deg: float | None,
         generation_profile: str = GENERATION_PROFILE_EXPORT,
-    ) -> tuple[str, float, int, float, str, str, str, str]:
+        *,
+        simplify_vector_output: bool = True,
+    ) -> tuple[str, float, int, float, str, str, str, str, str]:
         return (
             str(Path(input_path).resolve()).lower(),
             float(buffer_ft),
@@ -2170,6 +2220,7 @@ class BoundaryKmzApp:
                 else f"{float(split_direction_deg) % 180.0:.6f}"
             ),
             generation_profile,
+            "simplify" if simplify_vector_output else "preserve",
         )
 
     @staticmethod

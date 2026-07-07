@@ -122,6 +122,7 @@ class BoundaryMetadata:
     vector_simplification_tolerance_ft: float = 0.0
     vector_simplification_max_deviation_ft: float = 0.0
     vector_simplification_area_delta_pct: float = 0.0
+    vector_simplification_enabled: bool = True
     polyline_requested_buffer_ft: float = 0.0
     polyline_minimum_connected_buffer_ft: float = 0.0
     polyline_selected_buffer_ft: float = 0.0
@@ -359,6 +360,7 @@ def generate_boundary_from_input(
     outline_mode: str = OUTLINE_MODE_AUTO,
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
+    simplify_vector_output: bool = True,
 ) -> BoundaryResult:
     input_path = Path(input_path)
     if input_path.is_dir():
@@ -381,6 +383,7 @@ def generate_boundary_from_input(
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
+            simplify_vector_output=simplify_vector_output,
         )
     if input_path.is_file() and input_path.suffix.lower() == ".kml":
         return generate_boundary_from_vector_file(
@@ -391,6 +394,7 @@ def generate_boundary_from_input(
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
+            simplify_vector_output=simplify_vector_output,
         )
     raise BoundaryError("Choose a folder of JPGs, KML file, or KMZ file.")
 
@@ -403,6 +407,7 @@ def generate_boundary_from_kmz(
     shape_label: str = "",
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
+    simplify_vector_output: bool = True,
 ) -> BoundaryResult:
     kmz_path = Path(kmz_path)
     if kmz_path.suffix.lower() != ".kmz":
@@ -415,6 +420,7 @@ def generate_boundary_from_kmz(
         shape_label=shape_label,
         split_direction_deg=split_direction_deg,
         generation_profile=generation_profile,
+        simplify_vector_output=simplify_vector_output,
     )
 
 
@@ -426,6 +432,7 @@ def generate_boundary_from_vector_file(
     shape_label: str = "",
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
+    simplify_vector_output: bool = True,
 ) -> BoundaryResult:
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
@@ -450,6 +457,7 @@ def generate_boundary_from_vector_file(
             shape_label=shape_label,
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
+            simplify_vector_output=simplify_vector_output,
         )
     return _generate_boundary_from_polygon_vector(
         vector_geometry,
@@ -459,6 +467,7 @@ def generate_boundary_from_vector_file(
         shape_label=shape_label,
         split_direction_deg=split_direction_deg,
         generation_profile=generation_profile,
+        simplify_vector_output=simplify_vector_output,
     )
 
 
@@ -471,6 +480,7 @@ def _generate_boundary_from_polygon_vector(
     shape_label: str,
     split_direction_deg: float | None,
     generation_profile: str,
+    simplify_vector_output: bool,
 ) -> BoundaryResult:
     source_polygon_wgs84 = _ensure_polygon(
         fill_polygon_interiors(vector_geometry.polygons_wgs84[0])
@@ -514,7 +524,9 @@ def _generate_boundary_from_polygon_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
-    export_quality = generation_profile == GENERATION_PROFILE_EXPORT
+    export_quality = (
+        generation_profile == GENERATION_PROFILE_EXPORT and simplify_vector_output
+    )
     simplification_stats = VectorSimplificationStats(
         before_vertices=_polygon_vertex_count(final_projected),
         after_vertices=_polygon_vertex_count(final_projected),
@@ -595,6 +607,7 @@ def _generate_boundary_from_polygon_vector(
         vector_simplification_area_delta_pct=(
             simplification_stats.area_delta_ratio * 100.0
         ),
+        vector_simplification_enabled=simplify_vector_output,
         generation_profile=generation_profile,
     )
 
@@ -618,6 +631,7 @@ def _generate_boundary_from_polyline_vector(
     shape_label: str,
     split_direction_deg: float | None,
     generation_profile: str,
+    simplify_vector_output: bool,
 ) -> BoundaryResult:
     try:
         line_boundary = build_polyline_boundary_with_recommended_buffer(
@@ -645,7 +659,9 @@ def _generate_boundary_from_polyline_vector(
     section_label = shape_label.strip()
     selected_split_direction_deg: float | None = None
     split_area_variance_pct = 0.0
-    export_quality = generation_profile == GENERATION_PROFILE_EXPORT
+    export_quality = (
+        generation_profile == GENERATION_PROFILE_EXPORT and simplify_vector_output
+    )
     simplification_stats = VectorSimplificationStats(
         before_vertices=_polygon_vertex_count(final_projected),
         after_vertices=_polygon_vertex_count(final_projected),
@@ -731,6 +747,7 @@ def _generate_boundary_from_polyline_vector(
         vector_simplification_area_delta_pct=(
             simplification_stats.area_delta_ratio * 100.0
         ),
+        vector_simplification_enabled=simplify_vector_output,
         polyline_requested_buffer_ft=float(
             line_boundary.diagnostics.get("requested_buffer_ft", buffer_ft)
         ),
@@ -1460,6 +1477,14 @@ def _format_exterior_cleanup(ignored_interior_count: int) -> str:
 def _format_vector_simplification_lines(metadata: BoundaryMetadata) -> list[str]:
     if metadata.vector_simplification_before_vertices <= 0:
         return []
+    if not metadata.vector_simplification_enabled:
+        return [
+            "Vector simplification: Off",
+            (
+                "Vector vertices preserved: "
+                f"{metadata.vector_simplification_before_vertices:,}"
+            ),
+        ]
     return [
         (
             "Vector simplification: "

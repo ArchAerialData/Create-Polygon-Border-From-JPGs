@@ -39,12 +39,25 @@ class GuiInputTests(TestCase):
             app.buffer_var.set("100")
             app.section_count_var.set("1")
 
-            input_path, _buffer, _count, _overlap, _label, outline_mode, _split, _out = (
-                app._read_inputs(require_output=False)
-            )
+            (
+                input_path,
+                _buffer,
+                _count,
+                _overlap,
+                _label,
+                outline_mode,
+                _split,
+                simplify_vector_output,
+                _out,
+            ) = app._read_inputs(require_output=False)
 
             self.assertEqual(input_path, kml_path)
             self.assertEqual(outline_mode, "source_polygon")
+            self.assertFalse(simplify_vector_output)
+
+            app.simplify_vector_var.set(True)
+
+            self.assertTrue(app._read_inputs(require_output=False)[7])
 
     def test_custom_split_direction_is_normalized(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
@@ -132,6 +145,36 @@ class GuiInputTests(TestCase):
 
             self.assertNotEqual(preview_key, export_key)
 
+    def test_settings_key_includes_vector_simplification_toggle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.kmz"
+            path.write_text("placeholder", encoding="utf-8")
+
+            preserve_key = BoundaryKmzApp._settings_key(
+                path,
+                0.0,
+                1,
+                0.0,
+                "",
+                "source_polygon",
+                None,
+                GENERATION_PROFILE_EXPORT,
+                simplify_vector_output=False,
+            )
+            simplify_key = BoundaryKmzApp._settings_key(
+                path,
+                0.0,
+                1,
+                0.0,
+                "",
+                "source_polygon",
+                None,
+                GENERATION_PROFILE_EXPORT,
+                simplify_vector_output=True,
+            )
+
+            self.assertNotEqual(preserve_key, simplify_key)
+
     def test_vector_input_disables_outline_mode(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
             kml_path = Path(tmp) / "input.kml"
@@ -140,6 +183,20 @@ class GuiInputTests(TestCase):
             app._update_outline_mode_state()
 
             self.assertEqual(str(app.outline_mode_combo.cget("state")), "disabled")
+            self.assertEqual(
+                str(app.simplify_vector_checkbutton.cget("state")),
+                "normal",
+            )
+
+    def test_folder_input_disables_vector_simplification_toggle(self) -> None:
+        with TemporaryDirectory() as tmp, _app() as app:
+            app.parent_var.set(str(Path(tmp)))
+            app._update_outline_mode_state()
+
+            self.assertEqual(
+                str(app.simplify_vector_checkbutton.cget("state")),
+                "disabled",
+            )
 
     def test_split_direction_controls_only_enable_for_multiple_sections(self) -> None:
         with _app() as app:
@@ -359,7 +416,7 @@ class GuiInputTests(TestCase):
             app._draw_preview(result)
             self.assertGreater(len(app._fullscreen_axes.lines), 0)
 
-    def test_preview_long_corridor_preserves_equal_map_scale(self) -> None:
+    def test_preview_long_corridor_uses_full_axes_with_equal_map_scale(self) -> None:
         with _app() as app:
             result = _long_corridor_boundary_result()
 
@@ -369,16 +426,17 @@ class GuiInputTests(TestCase):
             xlim = app.axes.get_xlim()
             ylim = app.axes.get_ylim()
             self.assertEqual(app.axes.get_aspect(), 1.0)
-            self.assertEqual(app.axes.get_adjustable(), "box")
+            self.assertEqual(app.axes.get_adjustable(), "datalim")
             self.assertFalse(app.axes.axison)
             self.assertIsNone(app.axes.get_legend())
             self.assertGreater(len(app.preview_key_content.winfo_children()), 1)
+            self.assertEqual(app.axes.get_position().bounds, (0.0, 0.0, 1.0, 1.0))
             self.assertLess(xlim[0], 0.0)
             self.assertGreater(xlim[1], 10000.0)
             self.assertLess(ylim[0], 0.0)
             self.assertGreater(ylim[1], 100.0)
 
-    def test_fullscreen_long_corridor_preserves_equal_map_scale(self) -> None:
+    def test_fullscreen_long_corridor_uses_full_axes_with_equal_map_scale(self) -> None:
         with _app() as app:
             result = _long_corridor_boundary_result()
             app._cached_result = result
@@ -389,10 +447,14 @@ class GuiInputTests(TestCase):
             xlim = app._fullscreen_axes.get_xlim()
             ylim = app._fullscreen_axes.get_ylim()
             self.assertEqual(app._fullscreen_axes.get_aspect(), 1.0)
-            self.assertEqual(app._fullscreen_axes.get_adjustable(), "box")
+            self.assertEqual(app._fullscreen_axes.get_adjustable(), "datalim")
             self.assertFalse(app._fullscreen_axes.axison)
             self.assertIsNone(app._fullscreen_axes.get_legend())
             self.assertGreater(len(app._fullscreen_key_content.winfo_children()), 1)
+            self.assertEqual(
+                app._fullscreen_axes.get_position().bounds,
+                (0.0, 0.0, 1.0, 1.0),
+            )
             self.assertLess(xlim[0], 0.0)
             self.assertGreater(xlim[1], 10000.0)
             self.assertLess(ylim[0], 0.0)
@@ -418,6 +480,7 @@ class GuiInputTests(TestCase):
                 shape_label,
                 outline_mode,
                 split_direction_deg,
+                simplify_vector_output,
             ) -> None:
                 captured.update(
                     input_path=input_path,
@@ -427,6 +490,7 @@ class GuiInputTests(TestCase):
                     shape_label=shape_label,
                     outline_mode=outline_mode,
                     split_direction_deg=split_direction_deg,
+                    simplify_vector_output=simplify_vector_output,
                 )
 
             app._start_preview_generation = fake_start_preview
@@ -441,6 +505,7 @@ class GuiInputTests(TestCase):
             self.assertEqual(captured["overlap_ft"], 25.0)
             self.assertEqual(captured["shape_label"], "Fullscreen Shape")
             self.assertEqual(captured["split_direction_deg"], 90.0)
+            self.assertFalse(captured["simplify_vector_output"])
 
     def test_fullscreen_direct_pan_uses_independent_canvas(self) -> None:
         with _app() as app:

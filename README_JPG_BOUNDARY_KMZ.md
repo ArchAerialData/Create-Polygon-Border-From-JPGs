@@ -43,13 +43,15 @@ In the app:
 3. Choose an outline mode for JPG folders. `Auto` is the default.
 4. Use the default output file name, enter a custom file name, or choose a
    different `.kmz` path.
-5. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
-6. For multiple shapes, set overlap feet, shape label, and split direction.
-7. Click `Scan / Preview`.
-8. Click `Export KMZ`.
-9. Click `View Output Folder` in the completion popup or main window to open
+5. For KML/KMZ inputs, turn on `Simplify KML/KMZ output vertices` only when
+   you want dense vector geometry reduced during export.
+6. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
+7. For multiple shapes, set overlap feet, shape label, and split direction.
+8. Click `Scan / Preview`.
+9. Click `Export KMZ`.
+10. Click `View Output Folder` in the completion popup or main window to open
    the folder containing the KMZ.
-10. Click `View Details` when you want the full scan/export summary.
+11. Click `View Details` when you want the full scan/export summary.
 
 ## Behavior
 
@@ -69,6 +71,9 @@ In the app:
 - Polygon holes and buffer-created interior rings are filled before preview,
   sectioning, and export. Outputs are exterior-only.
 - KML/KMZ vector input bypasses JPG outline modes and uses source-vector mode.
+- `Simplify KML/KMZ output vertices` is off by default in the GUI so manually
+  drawn source vertices are preserved during export. Turn it on for dense
+  programmatic KML/KMZ shapes when smaller output polygons are preferred.
 - Export remains KMZ even when the input is KML.
 - Source linework is not preserved in exported KMZs.
 - Pasted and dropped paths may be quoted; `file://` paths are normalized when
@@ -109,6 +114,8 @@ In the app:
   boundary without an imagery basemap.
 - The preview preserves map scale instead of stretching long or narrow shapes
   to fill the available panel.
+- The full white preview canvas is the interactive viewing area for pan and
+  zoom.
 - The preview includes Matplotlib navigation controls for resetting the view,
   panning, zooming, and saving a preview image.
 - Mouse wheel zooms while the cursor is over the preview, and left-click drag

@@ -125,6 +125,7 @@ class CoreRegressionTests(TestCase):
             result = generate_boundary_from_input(kml_path, buffer_ft=0.0)
             summary = format_summary(result.metadata)
 
+            self.assertTrue(result.metadata.vector_simplification_enabled)
             self.assertLess(
                 result.metadata.vector_simplification_after_vertices,
                 result.metadata.vector_simplification_before_vertices,
@@ -144,6 +145,30 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(len(result.final_polygon_projected.interiors), 0)
             self.assertIn("Vector simplification:", summary)
 
+    def test_dense_polygon_kml_input_can_preserve_original_vertices(self) -> None:
+        with TemporaryDirectory() as tmp:
+            kml_path = Path(tmp) / "dense_polygon.kml"
+            _write_text_kml(kml_path, _dense_polygon_kml_body())
+
+            result = generate_boundary_from_input(
+                kml_path,
+                buffer_ft=0.0,
+                simplify_vector_output=False,
+            )
+            summary = format_summary(result.metadata)
+
+            self.assertFalse(result.metadata.vector_simplification_enabled)
+            self.assertEqual(
+                result.metadata.vector_simplification_after_vertices,
+                result.metadata.vector_simplification_before_vertices,
+            )
+            self.assertEqual(
+                result.metadata.vector_simplification_after_vertices,
+                len(result.final_polygon_wgs84.exterior.coords),
+            )
+            self.assertIn("Vector simplification: Off", summary)
+            self.assertIn("Vector vertices preserved:", summary)
+
     def test_dense_polyline_kml_buffer_is_automatically_simplified(self) -> None:
         with TemporaryDirectory() as tmp:
             kml_path = Path(tmp) / "dense_line.kml"
@@ -152,6 +177,7 @@ class CoreRegressionTests(TestCase):
             result = generate_boundary_from_input(kml_path, buffer_ft=120.0)
 
             self.assertEqual(result.metadata.input_type, "KML polyline")
+            self.assertTrue(result.metadata.vector_simplification_enabled)
             self.assertLess(
                 result.metadata.vector_simplification_after_vertices,
                 result.metadata.vector_simplification_before_vertices,
