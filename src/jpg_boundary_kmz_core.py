@@ -46,6 +46,7 @@ from polyline_boundary import (
     PolylineBoundaryError,
     build_polyline_boundary_with_recommended_buffer,
 )
+from section_ordering import order_parts_for_human_view
 
 
 FEET_PER_METER = 3.280839895
@@ -982,6 +983,7 @@ def _build_recursive_connected_sections(
     densify_sections: bool,
 ) -> tuple[list[BoundarySection], NaturalSplitDiagnostics]:
     base_parts, split_angles = _partition_connected_polygon(parent_polygon, section_count)
+    base_parts = order_parts_for_human_view(parent_polygon, base_parts)
     sections: list[BoundarySection] = []
     base_area_acres: list[float] = []
 

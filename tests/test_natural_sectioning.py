@@ -36,8 +36,14 @@ class NaturalSectioningTests(TestCase):
         self.assertEqual(len(sections), 3)
         self.assertAlmostEqual(diagnostics.selected_split_direction_deg, 0.0)
         self.assertLessEqual(diagnostics.area_variance_pct, 1e-6)
-        self.assertLess(sections[0].polygon_projected.centroid.y, sections[1].polygon_projected.centroid.y)
-        self.assertLess(sections[1].polygon_projected.centroid.y, sections[2].polygon_projected.centroid.y)
+        self.assertGreater(
+            sections[0].polygon_projected.centroid.y,
+            sections[1].polygon_projected.centroid.y,
+        )
+        self.assertGreater(
+            sections[1].polygon_projected.centroid.y,
+            sections[2].polygon_projected.centroid.y,
+        )
         self.assertTrue(all(not section.polygon_projected.interiors for section in sections))
 
     def test_selected_north_south_split_direction_creates_side_by_side_sections(self) -> None:
@@ -54,9 +60,8 @@ class NaturalSectioningTests(TestCase):
 
         self.assertEqual(len(sections), 3)
         self.assertAlmostEqual(diagnostics.selected_split_direction_deg, 90.0)
-        centroid_xs = sorted(section.polygon_projected.centroid.x for section in sections)
-        self.assertLess(centroid_xs[0], centroid_xs[1])
-        self.assertLess(centroid_xs[1], centroid_xs[2])
+        centroid_xs = [section.polygon_projected.centroid.x for section in sections]
+        self.assertEqual(centroid_xs, sorted(centroid_xs))
 
     def test_custom_direction_is_normalized(self) -> None:
         sections, diagnostics = build_natural_sections(
@@ -128,7 +133,7 @@ class NaturalSectioningTests(TestCase):
         self.assertTrue(
             all(section.polygon_projected.geom_type == "Polygon" for section in sections)
         )
-        self.assertLessEqual(sections[1].polygon_projected.bounds[2], 100.0)
+        self.assertLessEqual(sections[0].polygon_projected.bounds[2], 100.0)
 
     def test_meaningful_disconnected_overlap_is_rejected(self) -> None:
         with self.assertRaisesRegex(NaturalSplitError, "overlap"):

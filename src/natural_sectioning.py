@@ -11,6 +11,7 @@ from shapely.ops import transform as transform_geometry
 from shapely.validation import make_valid
 
 from geometry_hardening import densify_projected_geometry, fill_polygon_interiors
+from section_ordering import orient_parallel_parts_for_human_view
 
 
 ACRES_PER_SQUARE_METER = 0.000247105381467
@@ -81,10 +82,15 @@ def build_natural_sections(
         max_area_variance_ratio,
     )
     direction = candidate.direction
+    ordered_base_parts, ordered_output_parts = orient_parallel_parts_for_human_view(
+        candidate.base_parts,
+        candidate.output_parts,
+        direction,
+    )
 
     sections: list[NaturalSection] = []
     for index, (base_part, output_part) in enumerate(
-        zip(candidate.base_parts, candidate.output_parts),
+        zip(ordered_base_parts, ordered_output_parts),
         start=1,
     ):
         projected = _strict_single_polygon(

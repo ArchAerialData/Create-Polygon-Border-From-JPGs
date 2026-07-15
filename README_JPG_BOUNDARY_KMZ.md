@@ -96,9 +96,10 @@ In the app:
   geometry cleanup, and projected segment densification before export.
 - Details report preflight pattern, camera order source, selected strategy,
   confidence, candidate summary, and any non-blocking Auto fallback reason.
-- When `# of Shapes` is greater than `1`, the app splits the buffered outline
-  into connected same-direction sections intended to look natural as
-  orthomosaic crops.
+- When `# of Shapes` is greater than `1`, the app first tries connected
+  same-direction sections intended to look natural as orthomosaic crops. In
+  `Auto`, a connected equal-area fallback is used when one parallel direction
+  cannot produce the requested count cleanly.
 - Split direction can be `Auto`, `0 deg / East-West`, `90 deg / North-South`,
   or a custom degree value. `Auto` uses source-line orientation when available
   and otherwise uses the parent polygon orientation.
@@ -106,8 +107,18 @@ In the app:
   split boundaries. A `50 ft` overlap means adjacent sections overlap by
   roughly 50 ft along shared cut areas.
 - Natural section base areas must stay within 20 percent of the average base
-  section area. If the app cannot create clean connected sections, it fails
-  before export instead of writing irregular crop shapes.
+  section area. If neither the natural splitter nor the connected `Auto`
+  fallback can produce usable sections, generation fails before export.
+- Section numbers use a static north-up map viewpoint and are assigned only
+  after section geometry is complete. Horizontal-dominant runs read from left
+  to right; vertically dominant runs read from top to bottom.
+- Compact two-dimensional layouts read by visual rows: top to bottom, and left
+  to right within each row.
+- Branched outlines number the longest visible main run first. Branches then
+  follow their attachment points along that run and number from each junction
+  outward; branches at the same attachment read top to bottom, then left to
+  right. Ordering changes names, legend order, and colors but not polygons,
+  areas, overlap, buffering, or simplification.
 - Multiple-section KMZs contain one folder named from the output KMZ filename
   stem and one polygon placemark per section, such as `Example (1 of 3)`.
 - The preview is schematic only: it plots camera points and the exported

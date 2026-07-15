@@ -287,6 +287,10 @@ class CoreRegressionTests(TestCase):
                 result.metadata.vertex_count,
                 sum(len(section.polygon_wgs84.exterior.coords) for section in result.sections),
             )
+            centroid_xs = [
+                section.polygon_projected.centroid.x for section in result.sections
+            ]
+            self.assertEqual(centroid_xs, sorted(centroid_xs))
             for raw_section, simplified_section in zip(raw_sections, result.sections):
                 self.assertLess(
                     len(simplified_section.polygon_projected.exterior.coords),
@@ -304,6 +308,11 @@ class CoreRegressionTests(TestCase):
                 kml_text = archive.read("doc.kml").decode("utf-8")
             self.assertEqual(kml_text.count("<Polygon"), 3)
             self.assertNotIn("innerBoundaryIs", kml_text)
+            name_positions = [
+                kml_text.index(f"<name>Crop ({index} of 3)</name>")
+                for index in range(1, 4)
+            ]
+            self.assertEqual(name_positions, sorted(name_positions))
 
     def test_vector_preview_profile_skips_export_simplification(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -513,6 +522,26 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(section.display_name, f"Elevon ({section.index} of 10)")
             self.assertTrue(section.polygon_projected.is_valid)
             self.assertEqual(len(section.polygon_projected.interiors), 0)
+
+        main_run = result.sections[:6]
+        main_centroid_xs = [section.polygon_projected.centroid.x for section in main_run]
+        self.assertEqual(main_centroid_xs, sorted(main_centroid_xs))
+        self.assertTrue(
+            all(
+                first.polygon_projected.distance(second.polygon_projected) <= 1e-6
+                for first, second in zip(main_run, main_run[1:])
+            )
+        )
+        north_branch = result.sections[6:8]
+        south_branch = result.sections[8:10]
+        self.assertGreater(
+            sum(section.polygon_projected.centroid.y for section in north_branch),
+            sum(section.polygon_projected.centroid.y for section in south_branch),
+        )
+        self.assertGreater(
+            south_branch[0].polygon_projected.centroid.y,
+            south_branch[1].polygon_projected.centroid.y,
+        )
 
     def test_unknown_outline_mode_raises_boundary_error(self) -> None:
         with TemporaryDirectory() as tmp:
