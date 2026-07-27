@@ -33,25 +33,66 @@ relative to its own location.
 
 In the app:
 
-1. Choose the parent folder that contains the flight folders, or choose a KML
-   or KMZ vector input.
-   You can also drag and drop that input folder, KML, or KMZ onto the drop
-   field.
-2. Enter a buffer distance in feet. Use `0` for no added buffer on JPG folder
-   and polygon KML/KMZ inputs. LineString KML/KMZ inputs require a buffer
-   greater than `0`.
-3. Choose an outline mode for JPG folders. `Auto` is the default.
-4. Use the default output file name, enter a custom file name, or choose a
-   different `.kmz` path.
-5. For KML/KMZ inputs, turn on `Simplify KML/KMZ output vertices` only when
-   you want dense vector geometry reduced during export.
-6. Leave `# of Shapes` at `1`, or enter a larger count to split the output.
-7. For multiple shapes, set overlap feet, shape label, and split direction.
-8. Click `Scan / Preview`.
-9. Click `Export KMZ`.
-10. Click `View Output Folder` in the completion popup or main window to open
-   the folder containing the KMZ.
-11. Click `View Details` when you want the full scan/export summary.
+1. Drop the parent JPG folder, KML, or KMZ onto the empty-state target, or use
+   `Browse Folder...` / `Browse KML/KMZ...`. After selection, the large input
+   target collapses into the compact top strip; dropping another input and
+   `Change Input` remain available.
+2. Open `Settings` and use `Input & Geometry` to set the buffer and JPG outline
+   mode. Use `0` for no added buffer on JPG folder and polygon KML/KMZ inputs.
+   LineString KML/KMZ inputs require a buffer greater than `0`. For KML/KMZ
+   inputs, turn on `Simplify KML/KMZ output vertices` only when dense vector
+   geometry should be reduced during export.
+3. Use `Sections` to set the shape count and, for multiple shapes, overlap,
+   shape label, split direction, and optional custom degrees.
+4. Use `Output` to set the file name or `.kmz` path.
+5. Click `Update Preview`. Buffer, shape count, and applicable overlap values
+   can also be adjusted from the bottom action bar for quick iterations.
+6. Click `Export KMZ`. `Update Preview` and `Export KMZ` remain in the fixed
+   action area as the window changes size.
+7. Use `Details` for the full scan/export summary, and `View Output Folder`
+   from the output settings or completion popup to open the KMZ folder.
+
+## GUI layout and workflow
+
+- The dark, blue-accented interface is a single-page shell with no navigation
+  sidebar, tabs, or page-level scrolling. The preview is the only expanding
+  area.
+- Startup sizing uses the taskbar-safe work area of the monitor under the
+  pointer at launch, with current-window, primary-monitor, and Tk fallbacks.
+  The app centers itself and applies a measured or conservative fit so the
+  decorated window remains usable on shorter or offset monitors.
+- The compact top strip contains the selected input plus `Change Input`, `Key`,
+  `Settings`, `Focus Preview`, and `Open Inspector`.
+- `Settings` opens a temporary overlay over the right side of the preview.
+  Its `Input & Geometry`, `Sections`, and `Output` accordion groups expand one
+  at a time and can be collapsed; the drawer can scroll internally on a short
+  display without making the primary shell scroll.
+- `Key` opens a separate preview-key overlay. The Settings and Key overlays are
+  mutually exclusive and do not permanently reduce the preview.
+- The responsive bottom action bar keeps status, quick buffer/section controls,
+  `Details`, `Update Preview`, and `Export KMZ` accessible. It changes from one
+  row to two rows when horizontal space is limited.
+- Editing a preview-affecting option keeps the last drawing visible and marks
+  it `Preview out of date`; click `Update Preview` to regenerate it. Selecting
+  a different input clears the prior drawing instead.
+- `Focus Preview` expands the main preview to a taskbar-safe maximized or
+  near-fullscreen fit while reusing its canvas, toolbar, overlays, and state.
+  `Open Inspector` retains the large detachable preview window with independent
+  section controls, key, pan/zoom, and `Apply Preview`.
+- Drag-and-drop and both browse workflows remain available. If optional
+  drag-and-drop initialization is unavailable, the browse buttons continue to
+  work.
+- The redesign changes GUI presentation and in-memory workflow state only. It
+  does not add, remove, or alter the boundary-processing and KMZ-export
+  contracts described below.
+
+Keyboard shortcuts:
+
+- `F5` or `Ctrl+Enter`: update the preview.
+- `Ctrl+E`: export the KMZ.
+- `Ctrl+,`: open or close Settings.
+- `Ctrl+L`: open Input & Geometry and focus the input path.
+- `Escape`: close the active overlay first, then exit Focus Preview.
 
 ## Behavior
 
@@ -79,7 +120,7 @@ In the app:
 - Pasted and dropped paths may be quoted; `file://` paths are normalized when
   the operating system supplies them.
 - If `tkinterdnd2` is installed, the input can be set by dragging and dropping
-  a folder or `.kmz` file onto the app.
+  a folder, `.kml`, or `.kmz` file onto the empty or compact input target.
 - The default KMZ location is the app-local `outputs` folder, so exporting does
   not require manually choosing an output path.
 - Editing `Output file name` keeps the current output folder and updates the
@@ -125,8 +166,7 @@ In the app:
   boundary without an imagery basemap.
 - The preview preserves map scale instead of stretching long or narrow shapes
   to fill the available panel.
-- The full white preview canvas is the interactive viewing area for pan and
-  zoom.
+- The full preview canvas is the interactive viewing area for pan and zoom.
 - The preview includes Matplotlib navigation controls for resetting the view,
   panning, zooming, and saving a preview image.
 - Mouse wheel zooms while the cursor is over the preview, and left-click drag

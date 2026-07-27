@@ -15,6 +15,27 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from jpg_boundary_gui_theme import (
+    PALETTE,
+    apply_gui_theme,
+    apply_native_chrome,
+    style_app_toplevel,
+    style_matplotlib_axes,
+    style_navigation_toolbar,
+    style_tk_canvas,
+    style_tk_label,
+    style_tk_text,
+)
+from jpg_boundary_gui_window import (
+    WindowFitResult,
+    apply_initial_geometry,
+    clamp_child_geometry,
+    fit_window_to_work_area,
+    get_launch_work_area,
+    get_outer_window_bounds,
+    get_window_work_area,
+)
+
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except ImportError:
@@ -54,6 +75,9 @@ PREVIEW_MAX_PLOT_POINTS = 2500
 PREVIEW_LIMIT_PADDING_RATIO = 0.04
 PREVIEW_KEY_PANEL_WIDTH = 340
 PREVIEW_KEY_WRAP_LENGTH = 270
+ACTION_BAR_MIN_BREAKPOINT = 1120
+HEADER_MIN_BREAKPOINT = 760
+SETTINGS_DRAWER_WIDTH = 430
 SPLIT_DIRECTION_OPTIONS = (
     "Auto",
     "0 deg / East-West",
@@ -66,7 +90,7 @@ class BoundaryKmzApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("JPG Boundary to KMZ")
-        self.root.minsize(980, 720)
+        self._theme_style = apply_gui_theme(self.root)
 
         default_output_path = self._default_output_path()
         self.parent_var = tk.StringVar()
@@ -81,6 +105,8 @@ class BoundaryKmzApp:
         self.split_direction_degrees_var = tk.StringVar(value="")
         self.simplify_vector_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
+        self.preview_state_var = tk.StringVar(value="No preview")
+        self.input_summary_var = tk.StringVar(value="No input selected")
         self._updating_output_fields = False
         self._updating_shape_label = False
         self._shape_label_touched = False
@@ -91,7 +117,36 @@ class BoundaryKmzApp:
         self._cached_settings: (
             tuple[str, float, int, float, str, str, str, str, str] | None
         ) = None
+        self._last_displayed_result: BoundaryResult | None = None
+        self._last_displayed_signature: tuple[str, ...] | None = None
+        self._preview_stale = False
+        self._stale_reason = ""
+        self._preview_error = ""
+        self._last_input_text = ""
         self._busy = False
+        self._settings_drawer_open = False
+        self._legend_open = False
+        self._focus_mode = False
+        self._has_selected_input = False
+        self._active_settings_group: str | None = "input"
+        self._settings_group_frames: dict[str, ttk.Frame] = {}
+        self._settings_group_buttons: dict[str, ttk.Button] = {}
+        self._drop_targets: list[tk.Widget] = []
+        self._drop_feedback_surfaces: dict[str, tk.Widget] = {}
+        self._all_mutation_widgets: list[tk.Widget] = []
+        self._section_multiple_widgets: list[tk.Widget] = []
+        self._custom_direction_widgets: list[tk.Widget] = []
+        self._vector_only_widgets: list[tk.Widget] = []
+        self._folder_only_widgets: list[tk.Widget] = []
+        self._busy_action_widgets: list[tk.Widget] = []
+        self._fullscreen_mutation_widgets: list[tk.Widget] = []
+        self._action_bar_breakpoint = ACTION_BAR_MIN_BREAKPOINT
+        self._action_bar_compact: bool | None = None
+        self._header_breakpoint = HEADER_MIN_BREAKPOINT
+        self._header_compact: bool | None = None
+        self._focus_saved_state: str | None = None
+        self._focus_saved_geometry: str | None = None
+        self._focus_title_was_mapped = True
         self._preview_pan_start: tuple[
             object,
             object,
@@ -138,331 +193,1227 @@ class BoundaryKmzApp:
         self.split_direction_var.trace_add("write", self._on_split_direction_changed)
         self.split_direction_degrees_var.trace_add("write", self._on_split_direction_changed)
         self.simplify_vector_var.trace_add("write", self._on_vector_simplification_changed)
+        self.buffer_var.trace_add("write", self._on_buffer_changed)
         self._update_outline_mode_state()
         self._update_section_control_state()
+        self._refresh_input_shell_state()
+        self._refresh_preview_state_badge()
+        self._register_keyboard_shortcuts()
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.root.after(100, self._drain_queue)
 
     def _build_ui(self) -> None:
-        root_frame = ttk.Frame(self.root, padding=12)
-        root_frame.grid(row=0, column=0, sticky="nsew")
+        self.root_frame = ttk.Frame(self.root, style="App.TFrame", padding=12)
+        self.root_frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        self.root_frame.columnconfigure(0, weight=1)
+        self.root_frame.rowconfigure(1, weight=1)
 
-        root_frame.columnconfigure(1, weight=1)
-        root_frame.rowconfigure(9, weight=1)
+        self._build_top_input_strip(self.root_frame)
+        self._build_preview_workspace(self.root_frame)
+        self._build_action_bar(self.root_frame)
+        self._refresh_header_layout()
 
-        ttk.Label(root_frame, text="Input folder, KML, or KMZ").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
+    def _build_top_input_strip(self, parent: ttk.Frame) -> None:
+        self.header_frame = ttk.Frame(
+            parent,
+            style="Card.TFrame",
+            padding=(12, 8),
         )
-        ttk.Entry(root_frame, textvariable=self.parent_var).grid(
-            row=0,
-            column=1,
-            sticky="ew",
-            pady=4,
+        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.header_frame.columnconfigure(1, weight=1)
+
+        self.app_title_label = ttk.Label(
+            self.header_frame,
+            text="JPG Boundary to KMZ",
+            style="Title.TLabel",
         )
-        input_buttons = ttk.Frame(root_frame)
-        input_buttons.grid(
-            row=0,
-            column=2,
-            sticky="ew",
-            padx=(8, 0),
-            pady=4,
+        self.app_title_label.grid(row=0, column=0, sticky="w", padx=(0, 14))
+
+        self.compact_input_target = tk.Label(
+            self.header_frame,
+            textvariable=self.input_summary_var,
+            anchor="w",
+            padx=10,
+            pady=6,
+            cursor="hand2",
+            background="#202838",
+            foreground="#d8e7ff",
+            highlightthickness=1,
+            highlightbackground="#3b4a63",
         )
-        input_buttons.columnconfigure(0, weight=1)
-        input_buttons.columnconfigure(1, weight=1)
-        ttk.Button(
-            input_buttons,
-            text="Browse Folder...",
+        self.compact_input_target.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        style_tk_label(
+            self.compact_input_target,
+            surface="#202838",
+            foreground="#d8e7ff",
+        )
+        self.compact_input_target.bind(
+            "<Button-1>",
+            lambda _event: self._open_input_settings(),
+        )
+
+        self.change_input_button = ttk.Button(
+            self.header_frame,
+            text="Change Input",
+            style="Ghost.TButton",
+            command=self._open_input_settings,
+        )
+        self.change_input_button.grid(row=0, column=2, padx=(0, 6))
+        self.key_button = ttk.Button(
+            self.header_frame,
+            text="Key",
+            style="Ghost.TButton",
+            command=self._toggle_preview_key,
+        )
+        self.key_button.grid(row=0, column=3, padx=(0, 6))
+        self.settings_button = ttk.Button(
+            self.header_frame,
+            text="Settings",
+            style="Secondary.TButton",
+            command=self._toggle_settings_drawer,
+        )
+        self.settings_button.grid(row=0, column=4, padx=(0, 6))
+        self.focus_button = ttk.Button(
+            self.header_frame,
+            text="Focus Preview",
+            style="Ghost.TButton",
+            command=self._toggle_focus_mode,
+        )
+        self.focus_button.grid(row=0, column=5, padx=(0, 6))
+        self.expand_preview_button = ttk.Button(
+            self.header_frame,
+            text="Open Inspector",
+            style="Ghost.TButton",
+            command=self._open_fullscreen_preview,
+        )
+        self.expand_preview_button.grid(row=0, column=6)
+        self._register_drop_target(
+            self.compact_input_target,
+            feedback_surface=self.compact_input_target,
+        )
+
+    def _build_preview_workspace(self, parent: ttk.Frame) -> None:
+        self.preview_frame = ttk.Frame(parent, style="Preview.TFrame")
+        self.preview_frame.grid(row=1, column=0, sticky="nsew")
+        self.preview_frame.columnconfigure(0, weight=1)
+        self.preview_frame.rowconfigure(1, weight=1)
+
+        self.preview_toolbar_frame = ttk.Frame(
+            self.preview_frame,
+            style="Toolbar.TFrame",
+        )
+        self.preview_toolbar_frame.grid(row=0, column=0, sticky="ew")
+        self.preview_toolbar_frame.columnconfigure(0, weight=1)
+
+        self.preview_stack = ttk.Frame(self.preview_frame, style="Preview.TFrame")
+        self.preview_stack.grid(row=1, column=0, sticky="nsew")
+        self.preview_stack.columnconfigure(0, weight=1)
+        self.preview_stack.rowconfigure(0, weight=1)
+
+        self.figure = Figure(figsize=(8, 5), dpi=100)
+        self.axes = self.figure.add_subplot(111)
+        self._draw_empty_preview()
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.preview_stack)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        style_tk_canvas(self.canvas_widget, PALETTE.BACKGROUND_DEEP)
+        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+
+        self.preview_toolbar = NavigationToolbar2Tk(
+            self.canvas,
+            self.preview_toolbar_frame,
+            pack_toolbar=False,
+        )
+        self.preview_toolbar.update()
+        self._disable_toolbar_coordinate_message(self.preview_toolbar)
+        style_navigation_toolbar(self.preview_toolbar)
+        self.preview_toolbar.grid(row=0, column=0, sticky="ew")
+
+        self._build_empty_input_overlay(self.preview_stack)
+        self._build_settings_drawer(self.preview_stack)
+        self._build_preview_key_overlay(self.preview_stack)
+        self._register_preview_interactions()
+
+    def _build_empty_input_overlay(self, parent: ttk.Frame) -> None:
+        self.empty_input_overlay = ttk.Frame(
+            parent,
+            style="Overlay.TFrame",
+            padding=(22, 18),
+        )
+        ttk.Label(
+            self.empty_input_overlay,
+            text="Choose an input to build a boundary",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, columnspan=2, pady=(0, 5))
+        ttk.Label(
+            self.empty_input_overlay,
+            text="Drop a JPG folder, KML, or KMZ file below",
+            style="Secondary.TLabel",
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 12))
+
+        drop_text = (
+            "Drop folder, KML, or KMZ here"
+            if DND_FILES is not None
+            else "Drag-and-drop unavailable — browse below"
+        )
+        self.drop_label = tk.Label(
+            self.empty_input_overlay,
+            text=drop_text,
+            anchor="center",
+            padx=36,
+            pady=24,
+            cursor="hand2",
+            background="#202838",
+            foreground="#d8e7ff",
+            highlightthickness=2,
+            highlightbackground="#3b82f6",
+        )
+        self.drop_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        style_tk_label(
+            self.drop_label,
+            surface="#202838",
+            foreground="#d8e7ff",
+        )
+        self.browse_folder_button = ttk.Button(
+            self.empty_input_overlay,
+            text="Browse Folder…",
+            style="Secondary.TButton",
             command=self._browse_parent,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
-            input_buttons,
-            text="Browse KML/KMZ...",
+        )
+        self.browse_folder_button.grid(row=3, column=0, sticky="ew", padx=(0, 5))
+        self.browse_vector_button = ttk.Button(
+            self.empty_input_overlay,
+            text="Browse KML/KMZ…",
+            style="Secondary.TButton",
             command=self._browse_kmz,
-        ).grid(row=0, column=1, sticky="ew")
+        )
+        self.browse_vector_button.grid(row=3, column=1, sticky="ew", padx=(5, 0))
+        self.empty_input_overlay.place(relx=0.5, rely=0.5, anchor="center")
+        self._register_drop_target(self.drop_label, feedback_surface=self.drop_label)
 
-        ttk.Label(root_frame, text="Buffer (feet)").grid(
+    def _build_settings_drawer(self, parent: ttk.Frame) -> None:
+        self.settings_drawer = ttk.Frame(
+            parent,
+            style="Overlay.TFrame",
+            padding=(12, 10),
+        )
+        self.settings_drawer.columnconfigure(0, weight=1)
+        self.settings_drawer.rowconfigure(1, weight=1)
+
+        drawer_header = ttk.Frame(self.settings_drawer, style="Overlay.TFrame")
+        drawer_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        drawer_header.columnconfigure(0, weight=1)
+        ttk.Label(
+            drawer_header,
+            text="Settings",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            drawer_header,
+            text="Close",
+            style="Ghost.TButton",
+            command=self._close_settings_drawer,
+        ).grid(row=0, column=1, sticky="e")
+
+        self.settings_canvas = tk.Canvas(
+            self.settings_drawer,
+            background="#252b38",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.settings_scrollbar = ttk.Scrollbar(
+            self.settings_drawer,
+            orient="vertical",
+            command=self.settings_canvas.yview,
+            style="App.Vertical.TScrollbar",
+        )
+        self.settings_content = ttk.Frame(
+            self.settings_canvas,
+            style="Overlay.TFrame",
+        )
+        self._settings_canvas_window = self.settings_canvas.create_window(
+            (0, 0),
+            window=self.settings_content,
+            anchor="nw",
+        )
+        self.settings_canvas.configure(yscrollcommand=self.settings_scrollbar.set)
+        self.settings_canvas.grid(row=1, column=0, sticky="nsew")
+        self.settings_scrollbar.grid(row=1, column=1, sticky="ns", padx=(6, 0))
+        self.settings_scrollbar.grid_remove()
+        self.settings_content.columnconfigure(0, weight=1)
+        self.settings_content.bind("<Configure>", self._update_settings_scrollregion)
+        self.settings_canvas.bind("<Configure>", self._update_settings_canvas_width)
+        self.settings_canvas.bind("<MouseWheel>", self._scroll_settings_drawer)
+        self.settings_content.bind("<MouseWheel>", self._scroll_settings_drawer)
+
+        self._create_settings_group(
+            self.settings_content,
+            "input",
+            "Input & Geometry",
+            self._build_geometry_settings,
+        )
+        self._create_settings_group(
+            self.settings_content,
+            "sections",
+            "Sections",
+            self._build_section_settings,
+        )
+        self._create_settings_group(
+            self.settings_content,
+            "output",
+            "Output",
+            self._build_output_settings,
+        )
+        self._bind_local_mousewheel_tree(
+            self.settings_drawer,
+            self._scroll_settings_drawer,
+        )
+        self.settings_drawer.place_forget()
+
+    def _create_settings_group(
+        self,
+        parent: ttk.Frame,
+        key: str,
+        title: str,
+        builder,
+    ) -> None:
+        row = len(self._settings_group_frames) * 2
+        header = ttk.Frame(parent, style="Card.TFrame", padding=(5, 4))
+        header.grid(row=row, column=0, sticky="ew", pady=(0, 4))
+        header.columnconfigure(1, weight=1)
+        button = ttk.Button(
+            header,
+            text=("▾ " if key == self._active_settings_group else "▸ ") + title,
+            style="Ghost.TButton",
+            command=lambda group=key: self._toggle_settings_group(group),
+        )
+        button.grid(row=0, column=0, sticky="w")
+        summary = ttk.Label(header, style="Muted.TLabel")
+        summary.grid(row=0, column=1, sticky="e", padx=(8, 4))
+
+        content = ttk.Frame(parent, style="Card.TFrame", padding=(10, 8))
+        content.grid(row=row + 1, column=0, sticky="ew", pady=(0, 8))
+        content.columnconfigure(1, weight=1)
+        builder(content)
+        if key != self._active_settings_group:
+            content.grid_remove()
+        self._settings_group_frames[key] = content
+        self._settings_group_buttons[key] = button
+        setattr(self, f"_{key}_settings_summary", summary)
+
+    def _build_geometry_settings(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Input path", style="Secondary.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
+        self.input_path_entry = ttk.Entry(
+            parent,
+            textvariable=self.parent_var,
+            style="App.TEntry",
+        )
+        self.input_path_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        input_buttons = ttk.Frame(parent, style="Card.TFrame")
+        input_buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 8))
+        input_buttons.columnconfigure((0, 1), weight=1)
+        self.drawer_browse_folder_button = ttk.Button(
+            input_buttons,
+            text="Browse Folder…",
+            style="Secondary.TButton",
+            command=self._browse_parent,
+        )
+        self.drawer_browse_folder_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.drawer_browse_vector_button = ttk.Button(
+            input_buttons,
+            text="Browse KML/KMZ…",
+            style="Secondary.TButton",
+            command=self._browse_kmz,
+        )
+        self.drawer_browse_vector_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        ttk.Label(parent, text="Buffer (feet)", style="Secondary.TLabel").grid(
             row=2,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
-        ttk.Entry(root_frame, textvariable=self.buffer_var, width=16).grid(
-            row=2,
-            column=1,
-            sticky="w",
-            pady=4,
+        self.buffer_entry = ttk.Entry(
+            parent,
+            textvariable=self.buffer_var,
+            width=16,
+            style="App.TEntry",
         )
+        self.buffer_entry.grid(row=2, column=1, sticky="ew", pady=4)
 
-        self.outline_mode_label = ttk.Label(root_frame, text="Outline mode")
-        self.outline_mode_label.grid(
-            row=3,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
+        self.outline_mode_label = ttk.Label(
+            parent,
+            text="Outline mode",
+            style="Secondary.TLabel",
         )
+        self.outline_mode_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.outline_mode_combo = ttk.Combobox(
-            root_frame,
+            parent,
             textvariable=self.outline_mode_var,
             values=list(OUTLINE_MODE_LABELS.keys()),
             state="readonly",
-            width=28,
+            style="App.TCombobox",
         )
-        self.outline_mode_combo.grid(row=3, column=1, sticky="w", pady=4)
+        self.outline_mode_combo.grid(row=3, column=1, sticky="ew", pady=4)
 
-        ttk.Label(root_frame, text="Output file name").grid(
+        self.simplify_vector_label = ttk.Label(
+            parent,
+            text="Vector output",
+            style="Secondary.TLabel",
+        )
+        self.simplify_vector_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.simplify_vector_checkbutton = ttk.Checkbutton(
+            parent,
+            text="Simplify KML/KMZ output vertices",
+            variable=self.simplify_vector_var,
+            style="Surface.TCheckbutton",
+        )
+        self.simplify_vector_checkbutton.grid(row=4, column=1, sticky="w", pady=4)
+
+    def _build_section_settings(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="# of Shapes", style="Secondary.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
+        self.section_count_spinbox = ttk.Spinbox(
+            parent,
+            from_=1,
+            to=MAX_SECTION_COUNT,
+            textvariable=self.section_count_var,
+            width=8,
+            style="App.TSpinbox",
+        )
+        self.section_count_spinbox.grid(row=0, column=1, sticky="ew", pady=4)
+
+        self.overlap_label = ttk.Label(
+            parent,
+            text="Overlap (feet)",
+            style="Secondary.TLabel",
+        )
+        self.overlap_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.overlap_entry = ttk.Entry(
+            parent,
+            textvariable=self.overlap_var,
+            style="App.TEntry",
+        )
+        self.overlap_entry.grid(row=1, column=1, sticky="ew", pady=4)
+
+        self.shape_label_label = ttk.Label(
+            parent,
+            text="Shape Label",
+            style="Secondary.TLabel",
+        )
+        self.shape_label_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.shape_label_entry = ttk.Entry(
+            parent,
+            textvariable=self.shape_label_var,
+            style="App.TEntry",
+        )
+        self.shape_label_entry.grid(row=2, column=1, sticky="ew", pady=4)
+
+        self.split_direction_label = ttk.Label(
+            parent,
+            text="Split direction",
+            style="Secondary.TLabel",
+        )
+        self.split_direction_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.split_direction_combo = ttk.Combobox(
+            parent,
+            textvariable=self.split_direction_var,
+            values=SPLIT_DIRECTION_OPTIONS,
+            state="readonly",
+            style="App.TCombobox",
+        )
+        self.split_direction_combo.grid(row=3, column=1, sticky="ew", pady=4)
+
+        self.split_direction_custom_label = ttk.Label(
+            parent,
+            text="Custom degrees",
+            style="Secondary.TLabel",
+        )
+        self.split_direction_custom_label.grid(
             row=4,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
-        output_name_frame = ttk.Frame(root_frame)
-        output_name_frame.grid(row=4, column=1, sticky="ew", pady=4)
+        self.split_direction_custom_entry = ttk.Entry(
+            parent,
+            textvariable=self.split_direction_degrees_var,
+            style="App.TEntry",
+        )
+        self.split_direction_custom_entry.grid(row=4, column=1, sticky="ew", pady=4)
+
+    def _build_output_settings(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Output file name", style="Secondary.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
+        output_name_frame = ttk.Frame(parent, style="Card.TFrame")
+        output_name_frame.grid(row=0, column=1, sticky="ew", pady=4)
         output_name_frame.columnconfigure(0, weight=1)
-        ttk.Entry(
+        self.output_name_entry = ttk.Entry(
             output_name_frame,
             textvariable=self.output_name_var,
-        ).grid(row=0, column=0, sticky="ew")
-        ttk.Label(output_name_frame, text=".kmz").grid(
-            row=0,
-            column=1,
-            sticky="w",
-            padx=(6, 0),
+            style="App.TEntry",
         )
+        self.output_name_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            output_name_frame,
+            text=".kmz",
+            style="Secondary.TLabel",
+        ).grid(row=0, column=1, padx=(5, 0))
 
-        ttk.Label(root_frame, text="Output KMZ").grid(
-            row=5,
+        ttk.Label(parent, text="Output KMZ", style="Secondary.TLabel").grid(
+            row=1,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=4,
         )
-        ttk.Entry(root_frame, textvariable=self.output_var).grid(
-            row=5,
-            column=1,
-            sticky="ew",
-            pady=4,
+        self.output_path_entry = ttk.Entry(
+            parent,
+            textvariable=self.output_var,
+            style="App.TEntry",
         )
-        output_buttons = ttk.Frame(root_frame)
-        output_buttons.grid(
-            row=5,
-            column=2,
-            sticky="ew",
-            padx=(8, 0),
-            pady=4,
-        )
-        output_buttons.columnconfigure(0, weight=1)
-        output_buttons.columnconfigure(1, weight=1)
-        ttk.Button(
+        self.output_path_entry.grid(row=1, column=1, sticky="ew", pady=4)
+
+        output_buttons = ttk.Frame(parent, style="Card.TFrame")
+        output_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        output_buttons.columnconfigure((0, 1), weight=1)
+        self.save_as_button = ttk.Button(
             output_buttons,
-            text="Save As...",
+            text="Save As…",
+            style="Secondary.TButton",
             command=self._browse_output,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
+        )
+        self.save_as_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.view_output_button = ttk.Button(
             output_buttons,
             text="View Output Folder",
+            style="Ghost.TButton",
             command=self._view_output_folder,
-        ).grid(row=0, column=1, sticky="ew")
-
-        self.simplify_vector_label = ttk.Label(root_frame, text="Vector output")
-        self.simplify_vector_label.grid(
-            row=6,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
         )
-        self.simplify_vector_checkbutton = ttk.Checkbutton(
-            root_frame,
-            text="Simplify KML/KMZ output vertices",
-            variable=self.simplify_vector_var,
+        self.view_output_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+    def _build_preview_key_overlay(self, parent: ttk.Frame) -> None:
+        self.preview_key_overlay = ttk.Frame(
+            parent,
+            style="Overlay.TFrame",
+            padding=(10, 8),
         )
-        self.simplify_vector_checkbutton.grid(row=6, column=1, sticky="w", pady=4)
-
-        sections_frame = ttk.LabelFrame(root_frame, text="Sections")
-        sections_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        sections_frame.columnconfigure(5, weight=1)
-
-        ttk.Label(sections_frame, text="# of Shapes").grid(
+        self.preview_key_overlay.columnconfigure(0, weight=1)
+        self.preview_key_overlay.rowconfigure(1, weight=1)
+        header = ttk.Frame(self.preview_key_overlay, style="Overlay.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Preview Key", style="Title.TLabel").grid(
             row=0,
             column=0,
             sticky="w",
-            padx=(8, 6),
-            pady=8,
         )
-        self.section_count_spinbox = ttk.Spinbox(
-            sections_frame,
-            from_=1,
-            to=MAX_SECTION_COUNT,
-            textvariable=self.section_count_var,
-            width=8,
-        )
-        self.section_count_spinbox.grid(row=0, column=1, sticky="w", pady=8)
-
-        self.overlap_label = ttk.Label(sections_frame, text="Overlap (feet)")
-        self.overlap_label.grid(
-            row=0,
-            column=2,
-            sticky="w",
-            padx=(16, 6),
-            pady=8,
-        )
-        self.overlap_entry = ttk.Entry(
-            sections_frame,
-            textvariable=self.overlap_var,
-            width=10,
-        )
-        self.overlap_entry.grid(row=0, column=3, sticky="w", pady=8)
-
-        self.shape_label_label = ttk.Label(sections_frame, text="Shape Label")
-        self.shape_label_label.grid(
-            row=0,
-            column=4,
-            sticky="w",
-            padx=(16, 6),
-            pady=8,
-        )
-        self.shape_label_entry = ttk.Entry(
-            sections_frame,
-            textvariable=self.shape_label_var,
-        )
-        self.shape_label_entry.grid(
-            row=0,
-            column=5,
-            sticky="ew",
-            padx=(0, 8),
-            pady=8,
-        )
-
-        self.split_direction_label = ttk.Label(sections_frame, text="Split direction")
-        self.split_direction_label.grid(
-            row=1,
-            column=0,
-            sticky="w",
-            padx=(8, 6),
-            pady=(0, 8),
-        )
-        self.split_direction_combo = ttk.Combobox(
-            sections_frame,
-            textvariable=self.split_direction_var,
-            values=SPLIT_DIRECTION_OPTIONS,
-            state="readonly",
-            width=20,
-        )
-        self.split_direction_combo.grid(row=1, column=1, sticky="w", pady=(0, 8))
-        self.split_direction_custom_label = ttk.Label(
-            sections_frame,
-            text="Degrees",
-        )
-        self.split_direction_custom_label.grid(
-            row=1,
-            column=2,
-            sticky="w",
-            padx=(16, 6),
-            pady=(0, 8),
-        )
-        self.split_direction_custom_entry = ttk.Entry(
-            sections_frame,
-            textvariable=self.split_direction_degrees_var,
-            width=10,
-        )
-        self.split_direction_custom_entry.grid(row=1, column=3, sticky="w", pady=(0, 8))
-
-        drop_frame = ttk.LabelFrame(root_frame, text="Drag and drop")
-        drop_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        drop_frame.columnconfigure(0, weight=1)
-
-        drop_text = (
-            "Drop an input folder, KML, or KMZ here"
-            if DND_FILES is not None
-            else "Drag-and-drop is unavailable; use Browse Folder or Browse KML/KMZ..."
-        )
-        self.drop_label = tk.Label(
-            drop_frame,
-            text=drop_text,
-            anchor="center",
-            padx=16,
-            pady=18,
-            relief="groove",
-            borderwidth=2,
-            background="#f3f6f8",
-            foreground="#1f2933",
-        )
-        self.drop_label.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
-        self._register_drop_target()
-
-        button_frame = ttk.Frame(root_frame)
-        button_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-        button_frame.columnconfigure(3, weight=1)
-
-        self.scan_button = ttk.Button(
-            button_frame,
-            text="Scan / Preview",
-            command=self._scan_clicked,
-        )
-        self.scan_button.grid(row=0, column=0, padx=(0, 8))
-
-        self.export_button = ttk.Button(
-            button_frame,
-            text="Export KMZ",
-            command=self._export_clicked,
-        )
-        self.export_button.grid(row=0, column=1, padx=(0, 8))
-
-        self.details_button = ttk.Button(
-            button_frame,
-            text="View Details",
-            command=self._show_details,
-            state="disabled",
-        )
-        self.details_button.grid(row=0, column=2, padx=(0, 8))
-
-        ttk.Label(button_frame, textvariable=self.status_var).grid(
-            row=0,
-            column=3,
-            sticky="w",
-        )
-
-        preview_frame = ttk.LabelFrame(root_frame, text="Preview")
-        preview_frame.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
-        preview_frame.columnconfigure(0, weight=1)
-        preview_frame.columnconfigure(1, weight=0)
-        preview_frame.rowconfigure(0, weight=1)
-
-        self.figure = Figure(figsize=(8, 5), dpi=100)
-        self.axes = self.figure.add_subplot(111)
-        self._draw_empty_preview()
-        self.canvas = FigureCanvasTkAgg(self.figure, master=preview_frame)
-        self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+        ttk.Button(
+            header,
+            text="Close",
+            style="Ghost.TButton",
+            command=self._close_preview_key,
+        ).grid(row=0, column=1, sticky="e")
         (
             self.preview_key_frame,
             self.preview_key_canvas,
             self.preview_key_content,
-        ) = self._create_preview_key_panel(preview_frame)
-        self.preview_key_frame.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        self.preview_toolbar = NavigationToolbar2Tk(
-            self.canvas,
-            preview_frame,
-            pack_toolbar=False,
+        ) = self._create_preview_key_panel(self.preview_key_overlay)
+        self.preview_key_frame.grid(row=1, column=0, sticky="nsew")
+        if self.preview_key_canvas is not None:
+            self.preview_key_canvas.bind("<MouseWheel>", self._scroll_preview_key)
+        if self.preview_key_content is not None:
+            self.preview_key_content.bind("<MouseWheel>", self._scroll_preview_key)
+        self.preview_key_overlay.place_forget()
+
+    def _build_action_bar(self, parent: ttk.Frame) -> None:
+        self.action_bar = ttk.Frame(
+            parent,
+            style="ActionBar.TFrame",
+            padding=(10, 8),
         )
-        self.preview_toolbar.update()
-        self._disable_toolbar_coordinate_message(self.preview_toolbar)
-        self.preview_toolbar.grid(row=1, column=0, sticky="ew")
-        self.expand_preview_button = ttk.Button(
-            preview_frame,
-            text="Expand Preview",
-            command=self._open_fullscreen_preview,
+        self.action_bar.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.action_bar.columnconfigure(0, weight=1)
+
+        self.action_left_group = ttk.Frame(self.action_bar, style="ActionBar.TFrame")
+        self.action_right_group = ttk.Frame(self.action_bar, style="ActionBar.TFrame")
+
+        self.preview_state_label = ttk.Label(
+            self.action_left_group,
+            textvariable=self.preview_state_var,
+            style="Status.TLabel",
         )
-        self.expand_preview_button.grid(row=1, column=1, sticky="e", padx=(8, 0))
-        self._register_preview_interactions()
+        self.preview_state_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.status_label = ttk.Label(
+            self.action_left_group,
+            textvariable=self.status_var,
+            style="Muted.TLabel",
+            width=28,
+        )
+        self.status_label.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        self.action_left_group.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            self.action_left_group,
+            text="Buffer",
+            style="Secondary.TLabel",
+        ).grid(row=0, column=2, padx=(0, 4))
+        self.quick_buffer_entry = ttk.Entry(
+            self.action_left_group,
+            textvariable=self.buffer_var,
+            width=8,
+            style="App.TEntry",
+        )
+        self.quick_buffer_entry.grid(row=0, column=3, padx=(0, 8))
+        ttk.Label(
+            self.action_left_group,
+            text="Shapes",
+            style="Secondary.TLabel",
+        ).grid(row=0, column=4, padx=(0, 4))
+        self.quick_section_count_spinbox = ttk.Spinbox(
+            self.action_left_group,
+            from_=1,
+            to=MAX_SECTION_COUNT,
+            textvariable=self.section_count_var,
+            width=5,
+            style="App.TSpinbox",
+        )
+        self.quick_section_count_spinbox.grid(row=0, column=5, padx=(0, 8))
+        self.quick_overlap_label = ttk.Label(
+            self.action_left_group,
+            text="Overlap",
+            style="Secondary.TLabel",
+        )
+        self.quick_overlap_label.grid(row=0, column=6, padx=(0, 4))
+        self.quick_overlap_entry = ttk.Entry(
+            self.action_left_group,
+            textvariable=self.overlap_var,
+            width=7,
+            style="App.TEntry",
+        )
+        self.quick_overlap_entry.grid(row=0, column=7)
+
+        self.busy_progress = ttk.Progressbar(
+            self.action_right_group,
+            mode="indeterminate",
+            length=70,
+            style="Busy.Horizontal.TProgressbar",
+        )
+        self.busy_progress.grid(row=0, column=0, padx=(0, 8))
+        self.busy_progress.grid_remove()
+        self.details_button = ttk.Button(
+            self.action_right_group,
+            text="Details",
+            style="Ghost.TButton",
+            command=self._show_details,
+            state="disabled",
+        )
+        self.details_button.grid(row=0, column=1, padx=(0, 8))
+        self.scan_button = ttk.Button(
+            self.action_right_group,
+            text="Update Preview",
+            style="Primary.TButton",
+            command=self._scan_clicked,
+        )
+        self.scan_button.grid(row=0, column=2, padx=(0, 8))
+        self.export_button = ttk.Button(
+            self.action_right_group,
+            text="Export KMZ",
+            style="Success.TButton",
+            command=self._export_clicked,
+        )
+        self.export_button.grid(row=0, column=3)
+
+        self._populate_widget_state_registries()
+        self.root.update_idletasks()
+        self._refresh_action_bar_layout()
+
+    def _populate_widget_state_registries(self) -> None:
+        self._all_mutation_widgets = [
+            self.input_path_entry,
+            self.buffer_entry,
+            self.outline_mode_combo,
+            self.simplify_vector_checkbutton,
+            self.section_count_spinbox,
+            self.overlap_entry,
+            self.shape_label_entry,
+            self.split_direction_combo,
+            self.split_direction_custom_entry,
+            self.output_name_entry,
+            self.output_path_entry,
+            self.quick_buffer_entry,
+            self.quick_section_count_spinbox,
+            self.quick_overlap_entry,
+        ]
+        self._busy_action_widgets = [
+            self.change_input_button,
+            self.browse_folder_button,
+            self.browse_vector_button,
+            self.drawer_browse_folder_button,
+            self.drawer_browse_vector_button,
+            self.save_as_button,
+            self.view_output_button,
+            self.scan_button,
+            self.export_button,
+        ]
+        self._section_multiple_widgets = [
+            self.overlap_label,
+            self.overlap_entry,
+            self.quick_overlap_label,
+            self.quick_overlap_entry,
+            self.shape_label_label,
+            self.shape_label_entry,
+            self.split_direction_label,
+            self.split_direction_combo,
+        ]
+        self._custom_direction_widgets = [
+            self.split_direction_custom_label,
+            self.split_direction_custom_entry,
+        ]
+        self._folder_only_widgets = [
+            self.outline_mode_label,
+            self.outline_mode_combo,
+        ]
+        self._vector_only_widgets = [
+            self.simplify_vector_label,
+            self.simplify_vector_checkbutton,
+        ]
+
+    def _toggle_settings_group(self, group: str) -> None:
+        if group not in self._settings_group_frames:
+            return
+        self._active_settings_group = (
+            None if self._active_settings_group == group else group
+        )
+        for key, frame in self._settings_group_frames.items():
+            title = {
+                "input": "Input & Geometry",
+                "sections": "Sections",
+                "output": "Output",
+            }[key]
+            expanded = key == self._active_settings_group
+            self._settings_group_buttons[key].configure(
+                text=("▾ " if expanded else "▸ ") + title
+            )
+            if expanded:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        self.settings_canvas.after_idle(
+            lambda: self.settings_canvas.configure(
+                scrollregion=self.settings_canvas.bbox("all")
+            )
+        )
+
+    def _toggle_settings_drawer(self) -> None:
+        if self._settings_drawer_open:
+            self._close_settings_drawer()
+            return
+        self._close_preview_key()
+        self._settings_drawer_open = True
+        self._place_settings_drawer()
+        self.settings_drawer.lift()
+
+    def _close_settings_drawer(self) -> None:
+        self._settings_drawer_open = False
+        if hasattr(self, "settings_drawer"):
+            self.settings_drawer.place_forget()
+
+    def _open_input_settings(self) -> None:
+        self._close_preview_key()
+        self._settings_drawer_open = True
+        if self._active_settings_group != "input":
+            self._toggle_settings_group("input")
+        self._place_settings_drawer()
+        self.settings_drawer.lift()
+        self.input_path_entry.focus_set()
+        self.input_path_entry.icursor("end")
+
+    def _place_settings_drawer(self) -> None:
+        self.preview_stack.update_idletasks()
+        available = max(self.preview_stack.winfo_width() - 24, 300)
+        width = min(SETTINGS_DRAWER_WIDTH, available)
+        self.settings_drawer.place(
+            relx=1.0,
+            rely=0.0,
+            relheight=1.0,
+            width=width,
+            anchor="ne",
+        )
+        self.settings_drawer.after_idle(self._refresh_settings_scrollbar)
+
+    def _toggle_preview_key(self) -> None:
+        if self._legend_open:
+            self._close_preview_key()
+            return
+        self._close_settings_drawer()
+        self._legend_open = True
+        self._place_preview_key()
+        self.preview_key_overlay.lift()
+
+    def _close_preview_key(self) -> None:
+        self._legend_open = False
+        if hasattr(self, "preview_key_overlay"):
+            self.preview_key_overlay.place_forget()
+
+    def _place_preview_key(self) -> None:
+        self.preview_stack.update_idletasks()
+        available = max(self.preview_stack.winfo_width() - 24, 280)
+        width = min(PREVIEW_KEY_PANEL_WIDTH + 28, available)
+        self.preview_key_overlay.place(
+            relx=1.0,
+            rely=0.0,
+            relheight=1.0,
+            width=width,
+            anchor="ne",
+        )
+
+    def _close_topmost_overlay(self) -> bool:
+        if self._settings_drawer_open:
+            self._close_settings_drawer()
+            return True
+        if self._legend_open:
+            self._close_preview_key()
+            return True
+        return False
+
+    def _update_settings_scrollregion(self, _event: object) -> None:
+        self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all"))
+        self._refresh_settings_scrollbar()
+
+    def _update_settings_canvas_width(self, event: object) -> None:
+        width = max(int(getattr(event, "width", SETTINGS_DRAWER_WIDTH)), 1)
+        self.settings_canvas.itemconfigure(self._settings_canvas_window, width=width)
+        self._refresh_settings_scrollbar()
+
+    def _refresh_settings_scrollbar(self) -> None:
+        try:
+            bounds = self.settings_canvas.bbox("all")
+            canvas_height = max(1, self.settings_canvas.winfo_height())
+            content_height = 0 if bounds is None else bounds[3] - bounds[1]
+            if content_height > canvas_height:
+                self.settings_scrollbar.grid()
+            else:
+                self.settings_scrollbar.grid_remove()
+        except tk.TclError:
+            return
+
+    def _scroll_settings_drawer(self, event: object) -> str:
+        delta = int(getattr(event, "delta", 0))
+        if delta:
+            self.settings_canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+        return "break"
+
+    def _scroll_preview_key(self, event: object) -> str:
+        self._scroll_key_canvas(self.preview_key_canvas, event)
+        return "break"
+
+    def _scroll_fullscreen_preview_key(self, event: object) -> str:
+        self._scroll_key_canvas(self._fullscreen_key_canvas, event)
+        return "break"
+
+    @staticmethod
+    def _scroll_key_canvas(canvas: tk.Canvas | None, event: object) -> None:
+        if canvas is None:
+            return
+        delta = int(getattr(event, "delta", 0))
+        if delta:
+            canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+
+    def _preview_key_scroll_handler(self, key_content: ttk.Frame):
+        if key_content is self._fullscreen_key_content:
+            return self._scroll_fullscreen_preview_key
+        return self._scroll_preview_key
+
+    def _bind_local_mousewheel_tree(self, widget: tk.Widget, handler) -> None:
+        """Bind wheel scrolling only inside one overlay widget tree."""
+        try:
+            widget.bind("<MouseWheel>", handler, add="+")
+            for child in widget.winfo_children():
+                self._bind_local_mousewheel_tree(child, handler)
+        except tk.TclError:
+            return
+
+    def _refresh_drawer_summaries(self) -> None:
+        summaries = {
+            "input": (
+                f"Buffer {self.buffer_var.get().strip() or '—'} · "
+                f"{self.outline_mode_var.get().strip() or 'Auto'}"
+            ),
+            "sections": (
+                f"{self.section_count_var.get().strip() or '—'} shape(s)"
+            ),
+            "output": self.output_name_var.get().strip() or "Unnamed",
+        }
+        for key, text in summaries.items():
+            label = getattr(self, f"_{key}_settings_summary", None)
+            if label is not None:
+                label.configure(text=text[:34])
+
+    def _on_root_configure(self, event: object) -> None:
+        if getattr(event, "widget", None) is not self.root:
+            return
+        if self._settings_drawer_open:
+            self._place_settings_drawer()
+        elif self._legend_open:
+            self._place_preview_key()
+        width = int(getattr(event, "width", 0)) or None
+        self._refresh_header_layout(width)
+        self._refresh_action_bar_layout(width)
+
+    def _refresh_header_layout(self, width: int | None = None) -> None:
+        if not hasattr(self, "header_frame"):
+            return
+        self.root.update_idletasks()
+        fixed_width = (
+            self.app_title_label.winfo_reqwidth()
+            + self.change_input_button.winfo_reqwidth()
+            + self.key_button.winfo_reqwidth()
+            + self.settings_button.winfo_reqwidth()
+            + self.focus_button.winfo_reqwidth()
+            + self.expand_preview_button.winfo_reqwidth()
+            + 130
+        )
+        self._header_breakpoint = max(HEADER_MIN_BREAKPOINT, fixed_width)
+        current_width = width or self.root.winfo_width()
+        compact = current_width < self._header_breakpoint
+        if compact == self._header_compact:
+            return
+
+        self._header_compact = compact
+        for widget in (
+            self.app_title_label,
+            self.compact_input_target,
+            self.change_input_button,
+            self.key_button,
+            self.settings_button,
+            self.focus_button,
+            self.expand_preview_button,
+        ):
+            widget.grid_forget()
+
+        show_title = not self._focus_mode and self._focus_title_was_mapped
+        if compact:
+            if show_title:
+                self.app_title_label.grid(
+                    row=0,
+                    column=0,
+                    sticky="w",
+                    padx=(0, 10),
+                )
+            self.compact_input_target.grid(
+                row=0,
+                column=1,
+                columnspan=6,
+                sticky="ew",
+            )
+            self.change_input_button.grid(row=1, column=0, pady=(6, 0))
+            self.key_button.grid(row=1, column=1, padx=(6, 0), pady=(6, 0))
+            self.settings_button.grid(row=1, column=2, padx=(6, 0), pady=(6, 0))
+            self.focus_button.grid(row=1, column=3, padx=(6, 0), pady=(6, 0))
+            self.expand_preview_button.grid(
+                row=1,
+                column=4,
+                padx=(6, 0),
+                pady=(6, 0),
+            )
+        else:
+            if show_title:
+                self.app_title_label.grid(
+                    row=0,
+                    column=0,
+                    sticky="w",
+                    padx=(0, 14),
+                )
+            self.compact_input_target.grid(
+                row=0,
+                column=1,
+                sticky="ew",
+                padx=(0, 8),
+            )
+            self.change_input_button.grid(row=0, column=2, padx=(0, 6))
+            self.key_button.grid(row=0, column=3, padx=(0, 6))
+            self.settings_button.grid(row=0, column=4, padx=(0, 6))
+            self.focus_button.grid(row=0, column=5, padx=(0, 6))
+            self.expand_preview_button.grid(row=0, column=6)
+
+    def _refresh_action_bar_layout(self, width: int | None = None) -> None:
+        if not hasattr(self, "action_left_group"):
+            return
+        self.root.update_idletasks()
+        self._action_bar_breakpoint = max(
+            ACTION_BAR_MIN_BREAKPOINT,
+            self.action_left_group.winfo_reqwidth()
+            + self.action_right_group.winfo_reqwidth()
+            + 32,
+        )
+        current_width = width or self.root.winfo_width()
+        compact = current_width < self._action_bar_breakpoint
+        if compact == self._action_bar_compact:
+            return
+        self._action_bar_compact = compact
+        self.action_left_group.grid_forget()
+        self.action_right_group.grid_forget()
+        if compact:
+            self.action_left_group.grid(row=0, column=0, sticky="ew")
+            self.action_right_group.grid(row=1, column=0, sticky="e", pady=(8, 0))
+        else:
+            self.action_left_group.grid(row=0, column=0, sticky="ew")
+            self.action_right_group.grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+    def _refresh_input_shell_state(self) -> None:
+        text = self.parent_var.get().strip()
+        self._has_selected_input = bool(text)
+        if text:
+            path = self._path_from_text(text)
+            display = str(path)
+            if len(display) > 78:
+                display = f"…{display[-77:]}"
+            self.input_summary_var.set(f"Input: {display}")
+            if hasattr(self, "empty_input_overlay"):
+                self.empty_input_overlay.place_forget()
+        else:
+            self.input_summary_var.set("No input selected — drop or browse to begin")
+            if hasattr(self, "empty_input_overlay"):
+                self.empty_input_overlay.place(
+                    relx=0.5,
+                    rely=0.5,
+                    anchor="center",
+                )
+                self.empty_input_overlay.lift()
+
+    def _register_keyboard_shortcuts(self) -> None:
+        self.root.bind("<F5>", self._shortcut_update_preview, add="+")
+        self.root.bind("<Control-Return>", self._shortcut_update_preview, add="+")
+        self.root.bind("<Control-e>", self._shortcut_export, add="+")
+        self.root.bind("<Control-E>", self._shortcut_export, add="+")
+        self.root.bind("<Control-comma>", self._shortcut_toggle_settings, add="+")
+        self.root.bind("<Control-l>", self._shortcut_focus_input, add="+")
+        self.root.bind("<Control-L>", self._shortcut_focus_input, add="+")
+        self.root.bind("<Escape>", self._shortcut_escape, add="+")
+
+    def _shortcut_update_preview(self, _event: object = None) -> str:
+        if not self._busy:
+            self._scan_clicked()
+        return "break"
+
+    def _shortcut_export(self, _event: object = None) -> str:
+        if not self._busy:
+            self._export_clicked()
+        return "break"
+
+    def _shortcut_toggle_settings(self, _event: object = None) -> str:
+        self._toggle_settings_drawer()
+        return "break"
+
+    def _shortcut_focus_input(self, _event: object = None) -> str:
+        if not self._busy:
+            self._open_input_settings()
+        return "break"
+
+    def _shortcut_escape(self, _event: object = None) -> str:
+        if self._close_topmost_overlay():
+            return "break"
+        if self._focus_mode:
+            self._exit_focus_mode()
+            return "break"
+        return "break"
+
+    def _toggle_focus_mode(self) -> None:
+        if self._focus_mode:
+            self._exit_focus_mode()
+        else:
+            self._enter_focus_mode()
+
+    def _enter_focus_mode(self) -> None:
+        if self._focus_mode:
+            return
+        self._focus_mode = True
+        self._focus_saved_state = str(self.root.state())
+        self._focus_saved_geometry = self.root.geometry()
+        self._focus_title_was_mapped = bool(self.app_title_label.winfo_manager())
+        try:
+            self.app_title_label.grid_remove()
+        except tk.TclError:
+            pass
+        self.focus_button.configure(text="Exit Focus")
+
+        work_area = get_window_work_area(self.root)
+        zoom_contained = False
+        try:
+            if self._focus_saved_state != "zoomed":
+                self.root.state("zoomed")
+            self.root.update_idletasks()
+            outer_bounds = get_outer_window_bounds(self.root)
+            zoom_contained = (
+                outer_bounds is not None
+                and outer_bounds.is_within(work_area)
+            )
+        except tk.TclError:
+            zoom_contained = False
+
+        if zoom_contained:
+            return
+
+        try:
+            self.root.state("normal")
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        fit_window_to_work_area(
+            self.root,
+            work_area,
+            max_fraction=0.94,
+        )
+
+    def _exit_focus_mode(self) -> None:
+        if not self._focus_mode:
+            return
+        saved_state = self._focus_saved_state
+        saved_geometry = self._focus_saved_geometry
+        self._focus_mode = False
+        try:
+            if self._focus_title_was_mapped:
+                self.app_title_label.grid()
+            else:
+                self.app_title_label.grid_remove()
+        except tk.TclError:
+            pass
+        self.focus_button.configure(text="Focus Preview")
+        self._header_compact = None
+        self._refresh_header_layout()
+        try:
+            if saved_state == "zoomed":
+                self.root.state("zoomed")
+            elif saved_state == "withdrawn":
+                self.root.state("normal")
+                self.root.update_idletasks()
+                if saved_geometry:
+                    self.root.geometry(saved_geometry)
+                    self.root.update_idletasks()
+                self.root.withdraw()
+            else:
+                self.root.state("normal")
+                self.root.update_idletasks()
+                if saved_geometry:
+                    self.root.geometry(saved_geometry)
+                    self.root.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _preview_control_signature(self) -> tuple[str, ...]:
+        effective_shape_label = (
+            self.shape_label_var.get().strip()
+            if self._current_section_count_for_state() > 1
+            else ""
+        )
+        return (
+            self.parent_var.get().strip(),
+            self.buffer_var.get().strip(),
+            self.outline_mode_var.get().strip(),
+            self.section_count_var.get().strip(),
+            self.overlap_var.get().strip(),
+            effective_shape_label,
+            self.split_direction_var.get().strip(),
+            self.split_direction_degrees_var.get().strip(),
+            "1" if self.simplify_vector_var.get() else "0",
+        )
+
+    def _mark_preview_stale(self, reason: str = "") -> None:
+        self._preview_error = ""
+        if self._last_displayed_result is None:
+            self._preview_stale = False
+            self._stale_reason = ""
+        else:
+            self._preview_stale = True
+            self._stale_reason = reason
+        self._refresh_preview_state_badge()
+
+    def _mark_preview_current(self) -> None:
+        self._preview_stale = False
+        self._stale_reason = ""
+        self._preview_error = ""
+        self._last_displayed_signature = self._preview_control_signature()
+        self._refresh_preview_state_badge()
+
+    def _refresh_preview_state_badge(self) -> None:
+        if not hasattr(self, "preview_state_label"):
+            return
+        if self._busy:
+            self.preview_state_var.set("Working…")
+            self.preview_state_label.configure(style="Status.TLabel")
+        elif self._preview_error:
+            self.preview_state_var.set("Preview error")
+            self.preview_state_label.configure(style="Error.Status.TLabel")
+        elif self._preview_stale:
+            self.preview_state_var.set("Preview out of date")
+            self.preview_state_label.configure(style="Stale.Status.TLabel")
+        elif self._last_displayed_result is not None:
+            self.preview_state_var.set("Preview current")
+            self.preview_state_label.configure(style="Success.Status.TLabel")
+        else:
+            self.preview_state_var.set("No preview")
+            self.preview_state_label.configure(style="Status.TLabel")
+        if self._fullscreen_window_exists():
+            self._set_fullscreen_status(self._preview_status_text())
+
+    def _preview_status_text(self) -> str:
+        if self._busy:
+            return "Working…"
+        if self._preview_error:
+            return f"Error: {self._preview_error}"
+        if self._preview_stale:
+            if self._stale_reason:
+                return f"Preview out of date: {self._stale_reason}"
+            return "Preview out of date"
+        if self._last_displayed_result is not None:
+            return "Preview current"
+        return "No preview"
+
+    def _clear_preview_for_input_change(self) -> None:
+        self._last_displayed_result = None
+        self._last_displayed_signature = None
+        self._preview_stale = False
+        self._stale_reason = ""
+        self._preview_error = ""
+        if hasattr(self, "axes"):
+            self._draw_empty_preview()
+        self._refresh_preview_state_badge()
+
+    def _refresh_stale_from_signature(self, reason: str) -> None:
+        if (
+            self._last_displayed_signature is not None
+            and self._preview_control_signature() != self._last_displayed_signature
+        ):
+            self._mark_preview_stale(reason)
+        elif self._last_displayed_result is not None:
+            self._preview_stale = False
+            self._stale_reason = ""
+            self._preview_error = ""
+            self._refresh_preview_state_badge()
+
+    def _set_window_fit_warning(self, fit: WindowFitResult) -> None:
+        if fit.warning:
+            self.status_var.set(fit.warning)
 
     def _create_preview_key_panel(
         self,
@@ -479,6 +1430,7 @@ class BoundaryKmzApp:
             highlightthickness=0,
             borderwidth=0,
         )
+        style_tk_canvas(key_canvas, surface="surface")
         scrollbar = ttk.Scrollbar(
             key_frame,
             orient="vertical",
@@ -732,29 +1684,81 @@ class BoundaryKmzApp:
             return -1
         return 0
 
-    def _register_drop_target(self) -> None:
+    def _register_drop_target(
+        self,
+        target: tk.Widget,
+        *,
+        feedback_surface: tk.Widget | None = None,
+    ) -> None:
+        if target not in self._drop_targets:
+            self._drop_targets.append(target)
+        surface = feedback_surface or target
+        self._drop_feedback_surfaces[str(target)] = surface
         if DND_FILES is None:
             return
 
         try:
-            self.drop_label.drop_target_register(DND_FILES)
-            self.drop_label.dnd_bind("<<Drop>>", self._handle_folder_drop)
-            self.drop_label.dnd_bind("<<DragEnter>>", self._handle_drag_enter)
-            self.drop_label.dnd_bind("<<DragLeave>>", self._handle_drag_leave)
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self._handle_folder_drop)
+            target.dnd_bind("<<DragEnter>>", self._handle_drag_enter)
+            target.dnd_bind("<<DragLeave>>", self._handle_drag_leave)
         except (AttributeError, tk.TclError):
-            self.drop_label.configure(
-                text="Drag-and-drop failed to initialize; use Browse buttons...",
-                background="#fff4e5",
+            if target is getattr(self, "drop_label", None):
+                self.drop_label.configure(
+                    text="Drag-and-drop failed to initialize; use Browse buttons…",
+                )
+            self._set_drop_surface_active(surface, active=False, warning=True)
+
+    def _drop_surface_for_event(self, event: object) -> tk.Widget:
+        widget = getattr(event, "widget", None)
+        return self._drop_feedback_surfaces.get(
+            str(widget),
+            getattr(self, "drop_label", self.compact_input_target),
+        )
+
+    @staticmethod
+    def _set_drop_surface_active(
+        surface: tk.Widget,
+        *,
+        active: bool,
+        warning: bool = False,
+    ) -> None:
+        background = (
+            "#3a2f16"
+            if warning
+            else "#1e3a5f"
+            if active
+            else "#202838"
+        )
+        border = "#f59e0b" if warning else "#60a5fa" if active else "#3b4a63"
+        try:
+            surface.configure(
+                background=background,
+                highlightbackground=border,
             )
+        except tk.TclError:
+            return
 
-    def _handle_drag_enter(self, _event: object) -> None:
-        self.drop_label.configure(background="#dbeafe")
+    def _handle_drag_enter(self, event: object) -> None:
+        self._set_drop_surface_active(
+            self._drop_surface_for_event(event),
+            active=True,
+        )
 
-    def _handle_drag_leave(self, _event: object) -> None:
-        self.drop_label.configure(background="#f3f6f8")
+    def _handle_drag_leave(self, event: object) -> None:
+        self._set_drop_surface_active(
+            self._drop_surface_for_event(event),
+            active=False,
+        )
 
     def _handle_folder_drop(self, event: object) -> None:
-        self.drop_label.configure(background="#f3f6f8")
+        self._set_drop_surface_active(
+            self._drop_surface_for_event(event),
+            active=False,
+        )
+        if self._busy:
+            self.status_var.set("Please wait for the current operation to finish.")
+            return
         paths = self._parse_dropped_paths(getattr(event, "data", ""))
         inputs = [
             path
@@ -765,6 +1769,7 @@ class BoundaryKmzApp:
             messagebox.showerror(
                 "Invalid drop",
                 "Drop a folder that contains JPGs, a KML file, or a KMZ file.",
+                parent=self.root,
             )
             return
 
@@ -776,7 +1781,10 @@ class BoundaryKmzApp:
             self.status_var.set(f"Input set: {input_path}")
 
     def _browse_parent(self) -> None:
-        folder = filedialog.askdirectory(title="Choose parent folder containing JPGs")
+        folder = filedialog.askdirectory(
+            title="Choose parent folder containing JPGs",
+            parent=self.root,
+        )
         if not folder:
             return
         self._set_input_path(Path(folder))
@@ -799,6 +1807,7 @@ class BoundaryKmzApp:
                 ("All files", "*.*"),
             ],
             initialdir=initial_dir,
+            parent=self.root,
         )
         if not kmz_path:
             return
@@ -816,6 +1825,7 @@ class BoundaryKmzApp:
             filetypes=[("KMZ files", "*.kmz"), ("All files", "*.*")],
             initialdir=initial_dir,
             initialfile=initial_file,
+            parent=self.root,
         )
         if output:
             self._set_output_path(Path(output))
@@ -826,7 +1836,11 @@ class BoundaryKmzApp:
             self._open_output_folder(folder)
             self.status_var.set(f"Opened output folder: {folder}")
         except Exception as error:
-            messagebox.showerror("Open output folder failed", str(error))
+            messagebox.showerror(
+                "Open output folder failed",
+                str(error),
+                parent=self.root,
+            )
 
     def _current_output_folder(self) -> Path:
         output_text = self.output_var.get().strip()
@@ -866,6 +1880,8 @@ class BoundaryKmzApp:
             self._updating_output_fields = False
         self._refresh_shape_label_default()
         self._invalidate_cache()
+        self._refresh_stale_from_signature("Output-derived label changed.")
+        self._refresh_drawer_summaries()
 
     def _sync_output_name_from_path(self) -> None:
         output_text = self.output_var.get().strip()
@@ -884,6 +1900,8 @@ class BoundaryKmzApp:
         self._sync_output_name_from_path()
         self._refresh_shape_label_default()
         self._invalidate_cache()
+        self._refresh_stale_from_signature("Output-derived label changed.")
+        self._refresh_drawer_summaries()
 
     def _on_output_name_changed(self, *_args: object) -> None:
         if self._updating_output_fields:
@@ -892,6 +1910,8 @@ class BoundaryKmzApp:
         output_name = self.output_name_var.get().strip()
         if not output_name:
             self._invalidate_cache()
+            self._refresh_stale_from_signature("Output-derived label changed.")
+            self._refresh_drawer_summaries()
             return
 
         output_text = self.output_var.get().strip()
@@ -907,44 +1927,82 @@ class BoundaryKmzApp:
     def _on_input_changed(self, *_args: object) -> None:
         self._update_outline_mode_state()
         self._invalidate_cache()
+        current_text = self.parent_var.get().strip()
+        if current_text != self._last_input_text:
+            self._last_input_text = current_text
+            self._clear_preview_for_input_change()
+        self._refresh_input_shell_state()
+        self._refresh_drawer_summaries()
+
+    def _on_buffer_changed(self, *_args: object) -> None:
+        self._invalidate_cache()
+        self._mark_preview_stale("Buffer changed.")
+        self._refresh_drawer_summaries()
 
     def _on_outline_mode_changed(self, *_args: object) -> None:
         self._invalidate_cache()
+        self._mark_preview_stale("Outline mode changed.")
+        self._refresh_drawer_summaries()
 
     def _on_section_options_changed(self, *_args: object) -> None:
         self._update_section_control_state()
         self._refresh_shape_label_default()
         self._invalidate_cache()
+        self._mark_preview_stale("Section settings changed.")
+        self._refresh_drawer_summaries()
 
     def _on_shape_label_changed(self, *_args: object) -> None:
         if self._updating_shape_label:
             return
         self._shape_label_touched = True
         self._invalidate_cache()
+        self._mark_preview_stale("Shape label changed.")
+        self._refresh_drawer_summaries()
 
     def _on_split_direction_changed(self, *_args: object) -> None:
         self._update_section_control_state()
         self._invalidate_cache()
+        self._mark_preview_stale("Split direction changed.")
+        self._refresh_drawer_summaries()
 
     def _on_vector_simplification_changed(self, *_args: object) -> None:
         self._invalidate_cache()
+        self._mark_preview_stale("Vector simplification changed.")
+        self._refresh_drawer_summaries()
 
     def _update_section_control_state(self) -> None:
-        enabled = self._current_section_count_for_state() > 1
+        multiple_sections = self._current_section_count_for_state() > 1
+        enabled = multiple_sections and not self._busy
         state = "normal" if enabled else "disabled"
-        for widget in (
+        widgets = self._section_multiple_widgets or [
             self.overlap_label,
             self.overlap_entry,
             self.shape_label_label,
             self.shape_label_entry,
             self.split_direction_label,
-        ):
-            widget.configure(state=state)
-        self.split_direction_combo.configure(state="readonly" if enabled else "disabled")
+            self.split_direction_combo,
+        ]
+        for widget in widgets:
+            if isinstance(widget, ttk.Combobox):
+                widget.configure(state="readonly" if enabled else "disabled")
+            else:
+                widget.configure(state=state)
         custom_enabled = enabled and self.split_direction_var.get() == "Custom"
         custom_state = "normal" if custom_enabled else "disabled"
-        self.split_direction_custom_label.configure(state=custom_state)
-        self.split_direction_custom_entry.configure(state=custom_state)
+        custom_widgets = self._custom_direction_widgets or [
+            self.split_direction_custom_label,
+            self.split_direction_custom_entry,
+        ]
+        for widget in custom_widgets:
+            widget.configure(state=custom_state)
+        if hasattr(self, "quick_overlap_label"):
+            if multiple_sections:
+                self.quick_overlap_label.grid()
+                self.quick_overlap_entry.grid()
+            else:
+                self.quick_overlap_label.grid_remove()
+                self.quick_overlap_entry.grid_remove()
+            self._refresh_action_bar_layout()
 
     def _update_outline_mode_state(self) -> None:
         input_text = self.parent_var.get().strip()
@@ -952,12 +2010,21 @@ class BoundaryKmzApp:
         if input_text:
             input_path = self._path_from_text(input_text)
             is_vector_file = self._is_vector_file_path(input_path)
-        state = "disabled" if is_vector_file else "readonly"
-        self.outline_mode_combo.configure(state=state)
-        self.outline_mode_label.configure(state="disabled" if is_vector_file else "normal")
+        outline_enabled = not is_vector_file and not self._busy
+        for widget in self._folder_only_widgets or [
+            self.outline_mode_label,
+            self.outline_mode_combo,
+        ]:
+            if isinstance(widget, ttk.Combobox):
+                widget.configure(state="readonly" if outline_enabled else "disabled")
+            else:
+                widget.configure(state="normal" if outline_enabled else "disabled")
         simplify_state = "normal" if is_vector_file and not self._busy else "disabled"
-        self.simplify_vector_label.configure(state=simplify_state)
-        self.simplify_vector_checkbutton.configure(state=simplify_state)
+        for widget in self._vector_only_widgets or [
+            self.simplify_vector_label,
+            self.simplify_vector_checkbutton,
+        ]:
+            widget.configure(state=simplify_state)
 
     def _current_section_count_for_state(self) -> int:
         try:
@@ -992,7 +2059,7 @@ class BoundaryKmzApp:
                 self._read_inputs(require_output=False)
             )
         except BoundaryError as error:
-            messagebox.showerror("Invalid input", str(error))
+            messagebox.showerror("Invalid input", str(error), parent=self.root)
             return
 
         self._start_preview_generation(
@@ -1048,13 +2115,14 @@ class BoundaryKmzApp:
                 output_path,
             ) = self._read_inputs(require_output=True)
         except BoundaryError as error:
-            messagebox.showerror("Invalid input", str(error))
+            messagebox.showerror("Invalid input", str(error), parent=self.root)
             return
 
         if output_path.exists():
             overwrite = messagebox.askyesno(
                 "Overwrite KMZ?",
                 f"The output file already exists:\n\n{output_path}\n\nOverwrite it?",
+                parent=self.root,
             )
             if not overwrite:
                 return
@@ -1177,6 +2245,8 @@ class BoundaryKmzApp:
                 )
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
+                self._last_displayed_result = result
+                self._mark_preview_current()
                 self._set_busy(False, self._ready_status(result, "Preview ready."))
                 self._set_fullscreen_status(
                     self._ready_status(result, "Preview ready.")
@@ -1203,6 +2273,8 @@ class BoundaryKmzApp:
                     + f"\n\nSaved KMZ: {saved_path}"
                 )
                 self._draw_preview(result)
+                self._last_displayed_result = result
+                self._mark_preview_current()
                 self._set_busy(False, self._ready_status(result, "KMZ exported."))
                 self._set_fullscreen_status(
                     self._ready_status(result, "KMZ exported.")
@@ -1210,19 +2282,28 @@ class BoundaryKmzApp:
                 self._show_export_success(saved_path)
             elif kind == "error":
                 error = payload
-                self._set_busy(False, "Ready.")
                 self._write_status(str(error))
-                self._set_fullscreen_status(str(error))
-                messagebox.showerror("Boundary generation failed", str(error))
+                self._mark_preview_stale("Preview generation failed.")
+                self._preview_error = str(error)
+                error_status = f"Error: {error}"
+                self._set_busy(False, error_status)
+                self._set_fullscreen_status(error_status)
+                messagebox.showerror(
+                    "Boundary generation failed",
+                    str(error),
+                    parent=self.root,
+                )
 
         self.root.after(100, self._drain_queue)
 
     def _show_export_success(self, saved_path: Path) -> None:
         dialog = tk.Toplevel(self.root)
+        dialog.withdraw()
         dialog.title("KMZ exported")
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.columnconfigure(0, weight=1)
+        style_app_toplevel(dialog)
 
         content = ttk.Frame(dialog, padding=(20, 16, 20, 12))
         content.grid(row=0, column=0, sticky="nsew")
@@ -1262,23 +2343,13 @@ class BoundaryKmzApp:
         dialog.bind("<Return>", lambda _event: dialog.destroy())
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         self._center_child_window(dialog)
+        apply_native_chrome(dialog)
+        dialog.deiconify()
         dialog.grab_set()
         ok_button.focus_set()
 
     def _center_child_window(self, window: tk.Toplevel) -> None:
-        self.root.update_idletasks()
-        window.update_idletasks()
-
-        parent_x = self.root.winfo_rootx()
-        parent_y = self.root.winfo_rooty()
-        parent_width = self.root.winfo_width()
-        parent_height = self.root.winfo_height()
-        window_width = window.winfo_width()
-        window_height = window.winfo_height()
-
-        x = parent_x + max((parent_width - window_width) // 2, 0)
-        y = parent_y + max((parent_height - window_height) // 2, 0)
-        window.geometry(f"+{x}+{y}")
+        clamp_child_geometry(self.root, window)
 
     def _read_inputs(
         self,
@@ -1411,6 +2482,7 @@ class BoundaryKmzApp:
         key_content: ttk.Frame | None,
     ) -> None:
         axes.clear()
+        style_matplotlib_axes(figure, axes)
         key_entries: list[tuple[str, str, str, float]] = []
         if result.metadata.input_type == "JPG folder":
             axes.scatter(
@@ -1496,16 +2568,26 @@ class BoundaryKmzApp:
     ) -> None:
         if key_content is None:
             return
+        scroll_handler = self._preview_key_scroll_handler(key_content)
         for child in key_content.winfo_children():
             child.destroy()
 
         if not entries:
-            ttk.Label(
+            empty_label = ttk.Label(
                 key_content,
                 text="Key appears after preview.",
-                foreground="#6b7280",
+                foreground=PALETTE.TEXT_MUTED,
                 wraplength=PREVIEW_KEY_WRAP_LENGTH,
-            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=6)
+            )
+            empty_label.grid(
+                row=0,
+                column=0,
+                columnspan=2,
+                sticky="w",
+                padx=6,
+                pady=6,
+            )
+            empty_label.bind("<MouseWheel>", scroll_handler, add="+")
             return
 
         for row, (label, color, line_style, line_width) in enumerate(entries):
@@ -1516,6 +2598,7 @@ class BoundaryKmzApp:
                 highlightthickness=0,
                 borderwidth=0,
             )
+            style_tk_canvas(swatch, surface="surface")
             if line_style == "point":
                 swatch.create_oval(17, 6, 25, 14, fill=color, outline=color)
             else:
@@ -1528,12 +2611,15 @@ class BoundaryKmzApp:
                     line_options["dash"] = dash
                 swatch.create_line(4, 9, 38, 9, **line_options)
             swatch.grid(row=row, column=0, sticky="nw", padx=(6, 4), pady=3)
-            ttk.Label(
+            swatch.bind("<MouseWheel>", scroll_handler, add="+")
+            key_label = ttk.Label(
                 key_content,
                 text=label,
                 wraplength=PREVIEW_KEY_WRAP_LENGTH,
                 justify="left",
-            ).grid(row=row, column=1, sticky="w", padx=(0, 6), pady=3)
+            )
+            key_label.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=3)
+            key_label.bind("<MouseWheel>", scroll_handler, add="+")
 
     @staticmethod
     def _preview_key_dash(line_style: str) -> tuple[int, int] | None:
@@ -1634,16 +2720,17 @@ class BoundaryKmzApp:
         canvas: FigureCanvasTkAgg | None,
     ) -> None:
         axes.clear()
+        style_matplotlib_axes(figure, axes)
         axes.set_axis_off()
         axes.format_coord = lambda _x, _y: ""
         axes.text(
             0.5,
             0.5,
-            "Preview will appear after Scan / Preview",
+            "Preview will appear after Update Preview",
             ha="center",
             va="center",
             transform=axes.transAxes,
-            color="#374151",
+            color=PALETTE.TEXT_SECONDARY,
         )
         figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         if canvas is not None:
@@ -1658,10 +2745,12 @@ class BoundaryKmzApp:
             return
 
         window = tk.Toplevel(self.root)
+        window.withdraw()
         window.title("Preview Inspector")
-        window.minsize(900, 600)
+        window.minsize(640, 420)
         window.columnconfigure(0, weight=1)
         window.rowconfigure(1, weight=1)
+        style_app_toplevel(window)
         self._fullscreen_window = window
 
         controls = ttk.Frame(window, padding=(8, 6))
@@ -1776,6 +2865,13 @@ class BoundaryKmzApp:
             split_label,
             self._fullscreen_split_direction_combo,
         ]
+        self._fullscreen_mutation_widgets = [
+            section_spinbox,
+            overlap_entry,
+            shape_entry,
+            self._fullscreen_split_direction_combo,
+            self._fullscreen_split_direction_custom_entry,
+        ]
         self._fullscreen_section_count_var.trace_add(
             "write",
             lambda *_args: self._update_fullscreen_control_state(),
@@ -1798,12 +2894,22 @@ class BoundaryKmzApp:
             self._fullscreen_figure,
             master=plot_frame,
         )
-        self._fullscreen_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        fullscreen_canvas_widget = self._fullscreen_canvas.get_tk_widget()
+        style_tk_canvas(fullscreen_canvas_widget, PALETTE.BACKGROUND_DEEP)
+        fullscreen_canvas_widget.grid(row=0, column=0, sticky="nsew")
         (
             self._fullscreen_key_frame,
             self._fullscreen_key_canvas,
             self._fullscreen_key_content,
         ) = self._create_preview_key_panel(plot_frame)
+        self._fullscreen_key_canvas.bind(
+            "<MouseWheel>",
+            self._scroll_fullscreen_preview_key,
+        )
+        self._fullscreen_key_content.bind(
+            "<MouseWheel>",
+            self._scroll_fullscreen_preview_key,
+        )
         self._fullscreen_key_frame.grid(row=0, column=1, sticky="ns", padx=(8, 8))
         self._fullscreen_toolbar = NavigationToolbar2Tk(
             self._fullscreen_canvas,
@@ -1812,6 +2918,7 @@ class BoundaryKmzApp:
         )
         self._fullscreen_toolbar.update()
         self._disable_toolbar_coordinate_message(self._fullscreen_toolbar)
+        style_navigation_toolbar(self._fullscreen_toolbar)
         self._fullscreen_toolbar.grid(row=2, column=0, sticky="ew")
         self._fullscreen_event_cids = self._register_preview_canvas_interactions(
             self._fullscreen_canvas,
@@ -1822,7 +2929,11 @@ class BoundaryKmzApp:
         window.bind("<Escape>", lambda _event: self._close_fullscreen_preview())
         window.protocol("WM_DELETE_WINDOW", self._close_fullscreen_preview)
         self._draw_fullscreen_preview()
+        window.update_idletasks()
+        clamp_child_geometry(self.root, window)
+        apply_native_chrome(window)
         self._maximize_fullscreen_window(window)
+        window.deiconify()
         window.focus_set()
 
     def _apply_fullscreen_preview(self) -> None:
@@ -1901,6 +3012,26 @@ class BoundaryKmzApp:
         if not self._fullscreen_window_exists():
             return
 
+        if self._busy:
+            for widget in (
+                self._fullscreen_mutation_widgets
+                + self._fullscreen_section_widgets
+            ):
+                try:
+                    widget.configure(state="disabled")
+                except tk.TclError:
+                    continue
+            if self._fullscreen_split_direction_custom_label is not None:
+                self._fullscreen_split_direction_custom_label.configure(
+                    state="disabled"
+                )
+            if self._fullscreen_apply_button is not None:
+                self._fullscreen_apply_button.configure(state="disabled")
+            return
+
+        if self._fullscreen_apply_button is not None:
+            self._fullscreen_apply_button.configure(state="normal")
+
         enabled = True
         try:
             assert self._fullscreen_section_count_var is not None
@@ -1936,7 +3067,8 @@ class BoundaryKmzApp:
         ):
             return
 
-        preview_result = result or self._cached_result
+        preview_result = result or self._cached_result or self._last_displayed_result
+        self._set_fullscreen_status(self._preview_status_text())
         if preview_result is None:
             self._draw_empty_preview_on_axes(
                 self._fullscreen_axes,
@@ -1967,18 +3099,32 @@ class BoundaryKmzApp:
             return False
 
     def _maximize_fullscreen_window(self, window: tk.Toplevel) -> None:
+        work_area = get_window_work_area(window)
+        zoom_contained = False
         try:
             window.state("zoomed")
-            return
+            window.update_idletasks()
+            outer_bounds = get_outer_window_bounds(window)
+            zoom_contained = (
+                outer_bounds is not None
+                and outer_bounds.is_within(work_area)
+            )
         except tk.TclError:
-            pass
+            zoom_contained = False
+
+        if zoom_contained:
+            return
 
         try:
-            width = window.winfo_screenwidth()
-            height = window.winfo_screenheight()
-            window.geometry(f"{width}x{height}+0+0")
+            window.state("normal")
+            window.update_idletasks()
         except tk.TclError:
-            return
+            pass
+        fit_window_to_work_area(
+            window,
+            work_area,
+            max_fraction=0.94,
+        )
 
     def _close_fullscreen_preview(self) -> None:
         if self._fullscreen_canvas is not None:
@@ -2006,6 +3152,7 @@ class BoundaryKmzApp:
         self._fullscreen_split_direction_degrees_var = None
         self._fullscreen_apply_button = None
         self._fullscreen_section_widgets = []
+        self._fullscreen_mutation_widgets = []
         self._fullscreen_split_direction_combo = None
         self._fullscreen_split_direction_custom_label = None
         self._fullscreen_split_direction_custom_entry = None
@@ -2023,13 +3170,19 @@ class BoundaryKmzApp:
 
     def _show_details(self) -> None:
         if not self._details_text.strip():
-            messagebox.showinfo("Boundary Details", "No preview or export details yet.")
+            messagebox.showinfo(
+                "Boundary Details",
+                "No preview or export details yet.",
+                parent=self.root,
+            )
             return
 
         detail_window = tk.Toplevel(self.root)
+        detail_window.withdraw()
         detail_window.title("Boundary Details")
         detail_window.minsize(640, 420)
         detail_window.transient(self.root)
+        style_app_toplevel(detail_window)
 
         detail_window.columnconfigure(0, weight=1)
         detail_window.rowconfigure(0, weight=1)
@@ -2040,6 +3193,7 @@ class BoundaryKmzApp:
         text_frame.rowconfigure(0, weight=1)
 
         details_text = tk.Text(text_frame, wrap="word", height=18)
+        style_tk_text(details_text)
         scrollbar = ttk.Scrollbar(
             text_frame,
             orient="vertical",
@@ -2057,23 +3211,63 @@ class BoundaryKmzApp:
             text="Close",
             command=detail_window.destroy,
         ).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
+        self._center_child_window(detail_window)
+        apply_native_chrome(detail_window)
+        detail_window.deiconify()
 
     def _set_busy(self, busy: bool, status: str) -> None:
         self._busy = busy
-        state = "disabled" if busy else "normal"
-        self.scan_button.configure(state=state)
-        self.export_button.configure(state=state)
-        if hasattr(self, "expand_preview_button"):
-            self.expand_preview_button.configure(state=state)
-        if self._fullscreen_apply_button is not None:
-            self._fullscreen_apply_button.configure(state=state)
         if busy:
-            self.outline_mode_combo.configure(state="disabled")
-            self.simplify_vector_label.configure(state="disabled")
-            self.simplify_vector_checkbutton.configure(state="disabled")
+            self._preview_error = ""
+            for widget in (
+                self._all_mutation_widgets
+                + self._busy_action_widgets
+                + self._fullscreen_mutation_widgets
+            ):
+                try:
+                    widget.configure(state="disabled")
+                except tk.TclError:
+                    continue
+            if self._fullscreen_apply_button is not None:
+                self._fullscreen_apply_button.configure(state="disabled")
+            self.busy_progress.grid()
+            self.busy_progress.start(12)
         else:
+            self.busy_progress.stop()
+            self.busy_progress.grid_remove()
+            for widget in self._all_mutation_widgets:
+                try:
+                    widget.configure(
+                        state="readonly"
+                        if isinstance(widget, ttk.Combobox)
+                        else "normal"
+                    )
+                except tk.TclError:
+                    continue
+            for widget in self._busy_action_widgets:
+                try:
+                    widget.configure(state="normal")
+                except tk.TclError:
+                    continue
+            for widget in self._fullscreen_mutation_widgets:
+                try:
+                    widget.configure(
+                        state="readonly"
+                        if isinstance(widget, ttk.Combobox)
+                        else "normal"
+                    )
+                except tk.TclError:
+                    continue
+            if self._fullscreen_apply_button is not None:
+                self._fullscreen_apply_button.configure(state="normal")
             self._update_outline_mode_state()
+            self._update_section_control_state()
+            self._update_fullscreen_control_state()
+            self.details_button.configure(
+                state="normal" if self._details_text.strip() else "disabled"
+            )
         self.status_var.set(status)
+        self._refresh_preview_state_badge()
 
     def _invalidate_cache(self) -> None:
         self._cached_result = None
@@ -2265,7 +3459,14 @@ class BoundaryKmzApp:
 
 def main() -> None:
     root = _create_root()
+    root.withdraw()
+    work_area = get_launch_work_area(root)
     app = BoundaryKmzApp(root)
+    root.update_idletasks()
+    fit = apply_initial_geometry(root, work_area)
+    app._set_window_fit_warning(fit)
+    apply_native_chrome(root)
+    root.deiconify()
     root.mainloop()
 
 
