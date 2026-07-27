@@ -79,6 +79,10 @@ In the app:
   near-fullscreen fit while reusing its canvas, toolbar, overlays, and state.
   `Open Inspector` retains the large detachable preview window with independent
   section controls, key, pan/zoom, and `Apply Preview`.
+- A `World Imagery` checkbox and compact imagery status appear beside the
+  Matplotlib tools on both the main preview and Inspector. The checkbox is one
+  shared, session-only preference, so changing it on either surface updates
+  both without regenerating the boundary.
 - Drag-and-drop and both browse workflows remain available. If optional
   drag-and-drop initialization is unavailable, the browse buttons continue to
   work.
@@ -93,6 +97,52 @@ Keyboard shortcuts:
 - `Ctrl+,`: open or close Settings.
 - `Ctrl+L`: open Input & Geometry and focus the input path.
 - `Escape`: close the active overlay first, then exit Focus Preview.
+
+## Preview imagery and scale
+
+- `World Imagery` is checked by default. With an internet connection, the app
+  requests Esri World Imagery tiles for the visible map area and renders them
+  behind the existing vector preview. Imagery is display-only: it never enters
+  boundary processing and is never embedded in the exported KMZ.
+- Uncheck `World Imagery` to use `Original Background` mode. Both preview
+  surfaces immediately return to the original dark background, remove imagery
+  and provider attribution, and stop authorizing new imagery requests or HTTP
+  attempts. Vectors, navigation, preview generation, export, and the mileage
+  scale remain active.
+  At most one request already reserved in each of the two preview worker slots
+  may return afterward; such results are discarded without retry, a subsequent
+  tile fetch, metadata or tile-cache commit, response publication, or display.
+- Before the first imagery frame arrives, the original dark surface remains
+  visible beneath the vectors and scale as a nonblocking loading background.
+  This automatic loading state is separate from intentionally selecting
+  `Original Background`.
+- If the service or internet connection is unavailable, the app keeps the dark
+  vector preview operational and shows a nonmodal `Imagery unavailable` status.
+  `Update Preview` and `Export KMZ` do not depend on the basemap.
+- The scale bar is calculated geodesically from the current projected view,
+  displays statute miles using a readable length, and shows at most two decimal
+  places. It updates after result fitting, pan, wheel or toolbar zoom,
+  Home/Back/Forward navigation, resize, Focus Preview, and Inspector changes.
+  It remains available while imagery loads, fails, or is turned off.
+- Visible imagery always includes `Powered by Esri` and the service-provided
+  data attribution inside the Matplotlib figure. Preview images saved with the
+  Matplotlib toolbar therefore retain the imagery, scale, and attribution.
+- Tiles are held only in a bounded, session-memory cache. The app creates no
+  persistent or offline basemap cache, exposes no raw-tile export, and clears
+  transient tile state when the input changes, imagery is disabled, or the app
+  closes.
+- The service is public and currently does not require an app token, but its
+  content is proprietary and governed by Esri terms. Tile requests disclose
+  the requested map-tile locations and normal connection information, such as
+  the client IP address, to Esri.
+
+The automated suite is offline by default. A deliberately bounded live service
+smoke test can be opted into with:
+
+```powershell
+$env:JPG_BOUNDARY_LIVE_ESRI_TEST = "1"
+python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
+```
 
 ## Behavior
 
@@ -162,8 +212,8 @@ Keyboard shortcuts:
   areas, overlap, buffering, or simplification.
 - Multiple-section KMZs contain one folder named from the output KMZ filename
   stem and one polygon placemark per section, such as `Example (1 of 3)`.
-- The preview is schematic only: it plots camera points and the exported
-  boundary without an imagery basemap.
+- The preview always plots the existing camera/boundary vectors and can
+  optionally place Esri World Imagery behind them.
 - The preview preserves map scale instead of stretching long or narrow shapes
   to fill the available panel.
 - The full preview canvas is the interactive viewing area for pan and zoom.
@@ -208,3 +258,13 @@ python -m pip install -r "C:\path\to\jpg_boundary_kmz_app\requirements_jpg_bound
 - Tkinter file dialogs: https://docs.python.org/3/library/dialog.html#module-tkinter.filedialog
 - Matplotlib Tk embedding: https://matplotlib.org/stable/gallery/user_interfaces/embedding_in_tk_sgskip.html
 - Google KML reference: https://developers.google.com/kml/documentation/kmlreference
+- Esri World Imagery service:
+  https://wi.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer
+- Esri World Imagery item:
+  https://www.arcgis.com/home/item.html?id=898f58f2ee824b3c97bae0698563a4b3
+- ArcGIS Map Tile REST resource:
+  https://developers.arcgis.com/rest/services-reference/enterprise/map-tile/
+- Esri and data attribution:
+  https://developers.arcgis.com/documentation/esri-and-data-attribution/
+- Esri data attributions and terms:
+  https://www.esri.com/en-us/legal/terms/data-attributions

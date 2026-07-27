@@ -7,14 +7,26 @@ import sys
 import threading
 import tkinter as tk
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
 
+from matplotlib import patheffects
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from jpg_boundary_gui_basemap import (
+    MAX_OUTPUT_DIMENSION,
+    MAX_OUTPUT_PIXELS,
+    VIEW_DEBOUNCE_MS,
+    ArcGisBasemapClient,
+    BasemapFailure,
+    BasemapFrame,
+    ProjectedView,
+)
+from jpg_boundary_gui_scale_bar import ScaleBarController
 from jpg_boundary_gui_theme import (
     PALETTE,
     apply_gui_theme,
@@ -84,10 +96,44 @@ SPLIT_DIRECTION_OPTIONS = (
     "90 deg / North-South",
     "Custom",
 )
+BASEMAP_FAILURE_DIAGNOSTICS = {
+    "imagery_error": "Imagery is unavailable for this view.",
+    "metadata_unavailable": "Imagery service is temporarily unavailable.",
+    "metadata_incompatible": "Imagery service metadata is incompatible.",
+    "invalid_view": "Imagery is unavailable for this view.",
+    "tile_failures": "Imagery is unavailable for this view.",
+    "no_imagery": "No imagery is available for this view.",
+    "raster_error": "Imagery is unavailable for this view.",
+}
+
+
+@dataclass
+class _PreviewMapSurface:
+    surface_id: str
+    axes: object
+    figure: Figure
+    canvas: FigureCanvasTkAgg
+    status_var: tk.StringVar
+    surface_generation: int
+    result_generation: int | None
+    epsg: int | None
+    basemap_image: object | None
+    attribution_artist: object | None
+    scale_controller: ScaleBarController
+    observer_event_cids: list[int]
+    debounce_after_id: str | None
+    last_submitted_signature: tuple[object, ...] | None
+    last_applied_signature: tuple[object, ...] | None
 
 
 class BoundaryKmzApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        *,
+        basemap_client_factory=None,
+        basemap_client: ArcGisBasemapClient | None = None,
+    ) -> None:
         self.root = root
         self.root.title("JPG Boundary to KMZ")
         self._theme_style = apply_gui_theme(self.root)
@@ -104,6 +150,8 @@ class BoundaryKmzApp:
         self.split_direction_var = tk.StringVar(value="Auto")
         self.split_direction_degrees_var = tk.StringVar(value="")
         self.simplify_vector_var = tk.BooleanVar(value=False)
+        self.world_imagery_var = tk.BooleanVar(value=True)
+        self.imagery_status_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
         self.preview_state_var = tk.StringVar(value="No preview")
         self.input_summary_var = tk.StringVar(value="No input selected")
@@ -158,16 +206,37 @@ class BoundaryKmzApp:
             float,
         ] | None = None
         self._preview_event_cids: list[int] = []
+        self._main_map_surface: _PreviewMapSurface | None = None
+        self._fullscreen_map_surface: _PreviewMapSurface | None = None
+        self._basemap_client_factory = (
+            basemap_client_factory
+            if basemap_client_factory is not None
+            else ArcGisBasemapClient
+        )
+        self._basemap_client = basemap_client
+        self._basemap_poll_after_id: str | None = None
+        self._closing = False
+        self._accepted_result_generation = 0
+        self._active_result_generation: int | None = None
+        self._map_result_reference: BoundaryResult | None = None
+        self._fullscreen_surface_serial = 0
+        self._surface_draw_guards: set[str] = set()
+        self._surface_copyright_text: dict[str, str] = {}
+        self._surface_applied_status: dict[str, str] = {}
+        self._basemap_diagnostics: dict[str, tuple[str, str]] = {}
         self._fullscreen_window: tk.Toplevel | None = None
         self._fullscreen_event_cids: list[int] = []
         self._fullscreen_figure: Figure | None = None
         self._fullscreen_axes: object | None = None
         self._fullscreen_canvas: FigureCanvasTkAgg | None = None
         self._fullscreen_toolbar: NavigationToolbar2Tk | None = None
+        self._fullscreen_imagery_checkbutton: ttk.Checkbutton | None = None
+        self._fullscreen_imagery_status_label: ttk.Label | None = None
         self._fullscreen_key_frame: ttk.LabelFrame | None = None
         self._fullscreen_key_canvas: tk.Canvas | None = None
         self._fullscreen_key_content: ttk.Frame | None = None
         self._fullscreen_status_var: tk.StringVar | None = None
+        self._fullscreen_imagery_status_var: tk.StringVar | None = None
         self._fullscreen_section_count_var: tk.StringVar | None = None
         self._fullscreen_overlap_var: tk.StringVar | None = None
         self._fullscreen_shape_label_var: tk.StringVar | None = None
@@ -194,12 +263,14 @@ class BoundaryKmzApp:
         self.split_direction_degrees_var.trace_add("write", self._on_split_direction_changed)
         self.simplify_vector_var.trace_add("write", self._on_vector_simplification_changed)
         self.buffer_var.trace_add("write", self._on_buffer_changed)
+        self.world_imagery_var.trace_add("write", self._on_world_imagery_toggled)
         self._update_outline_mode_state()
         self._update_section_control_state()
         self._refresh_input_shell_state()
         self._refresh_preview_state_badge()
         self._register_keyboard_shortcuts()
         self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.protocol("WM_DELETE_WINDOW", self._shutdown_basemap)
         self.root.after(100, self._drain_queue)
 
     def _build_ui(self) -> None:
@@ -314,7 +385,6 @@ class BoundaryKmzApp:
 
         self.figure = Figure(figsize=(8, 5), dpi=100)
         self.axes = self.figure.add_subplot(111)
-        self._draw_empty_preview()
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.preview_stack)
         self.canvas_widget = self.canvas.get_tk_widget()
         style_tk_canvas(self.canvas_widget, PALETTE.BACKGROUND_DEEP)
@@ -330,10 +400,686 @@ class BoundaryKmzApp:
         style_navigation_toolbar(self.preview_toolbar)
         self.preview_toolbar.grid(row=0, column=0, sticky="ew")
 
+        self.preview_view_controls = ttk.Frame(
+            self.preview_toolbar_frame,
+            style="Toolbar.TFrame",
+        )
+        self.preview_view_controls.grid(row=0, column=1, sticky="e", padx=(8, 6))
+        self.world_imagery_checkbutton = ttk.Checkbutton(
+            self.preview_view_controls,
+            text="World Imagery",
+            variable=self.world_imagery_var,
+            style="Surface.TCheckbutton",
+        )
+        self.world_imagery_checkbutton.grid(row=0, column=0, sticky="e")
+        self.imagery_status_label = ttk.Label(
+            self.preview_view_controls,
+            textvariable=self.imagery_status_var,
+            style="Surface.Secondary.TLabel",
+            anchor="e",
+            width=20,
+        )
+        self.imagery_status_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        self._main_map_surface = self._create_preview_map_surface(
+            "main",
+            self.axes,
+            self.figure,
+            self.canvas,
+            self.imagery_status_var,
+        )
+        self._draw_empty_preview()
         self._build_empty_input_overlay(self.preview_stack)
         self._build_settings_drawer(self.preview_stack)
         self._build_preview_key_overlay(self.preview_stack)
         self._register_preview_interactions()
+
+    def _create_preview_map_surface(
+        self,
+        surface_id: str,
+        axes: object,
+        figure: Figure,
+        canvas: FigureCanvasTkAgg,
+        status_var: tk.StringVar,
+    ) -> _PreviewMapSurface:
+        surface = _PreviewMapSurface(
+            surface_id=surface_id,
+            axes=axes,
+            figure=figure,
+            canvas=canvas,
+            status_var=status_var,
+            surface_generation=0,
+            result_generation=None,
+            epsg=None,
+            basemap_image=None,
+            attribution_artist=None,
+            scale_controller=ScaleBarController(axes, canvas),
+            observer_event_cids=[],
+            debounce_after_id=None,
+            last_submitted_signature=None,
+            last_applied_signature=None,
+        )
+        surface.observer_event_cids = [
+            canvas.mpl_connect(
+                "draw_event",
+                lambda event, bound=surface: self._on_preview_map_surface_event(
+                    bound,
+                    event,
+                ),
+            ),
+            canvas.mpl_connect(
+                "resize_event",
+                lambda event, bound=surface: self._on_preview_map_surface_event(
+                    bound,
+                    event,
+                ),
+            ),
+        ]
+        return surface
+
+    def _active_map_surfaces(self) -> list[_PreviewMapSurface]:
+        surfaces: list[_PreviewMapSurface] = []
+        if self._main_map_surface is not None:
+            surfaces.append(self._main_map_surface)
+        if self._fullscreen_map_surface is not None:
+            surfaces.append(self._fullscreen_map_surface)
+        return surfaces
+
+    def _surface_is_active(self, surface: _PreviewMapSurface) -> bool:
+        if surface is self._main_map_surface:
+            return True
+        return (
+            surface is self._fullscreen_map_surface
+            and self._fullscreen_window_exists()
+        )
+
+    def _surface_for_id(self, surface_id: str) -> _PreviewMapSurface | None:
+        for surface in self._active_map_surfaces():
+            if surface.surface_id == surface_id:
+                return surface
+        return None
+
+    def _bind_preview_map_surface(
+        self,
+        surface: _PreviewMapSurface,
+        result_generation: int | None,
+        epsg: int | None,
+    ) -> None:
+        surface.result_generation = result_generation
+        surface.epsg = epsg
+        if result_generation is None or epsg is None:
+            surface.scale_controller.clear()
+            surface.status_var.set("")
+            return
+        surface.scale_controller.bind_result(epsg, result_generation)
+        surface.scale_controller.refresh()
+        surface.status_var.set(
+            "Imagery loading..." if self.world_imagery_var.get() else "Imagery off"
+        )
+
+    def _cancel_surface_debounce(self, surface: _PreviewMapSurface) -> None:
+        after_id = surface.debounce_after_id
+        surface.debounce_after_id = None
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except tk.TclError:
+            pass
+
+    def _reset_preview_map_surface(
+        self,
+        surface: _PreviewMapSurface,
+        *,
+        deregister: bool = False,
+    ) -> None:
+        self._cancel_surface_debounce(surface)
+        surface.surface_generation += 1
+        if self._basemap_client is not None:
+            if deregister:
+                self._basemap_client.deregister_surface(surface.surface_id)
+            else:
+                self._basemap_client.cancel_surface(
+                    surface.surface_id,
+                    surface.surface_generation,
+                )
+        self._remove_basemap_artist(surface)
+        surface.scale_controller.clear()
+        surface.result_generation = None
+        surface.epsg = None
+        surface.last_submitted_signature = None
+        surface.last_applied_signature = None
+        surface.status_var.set("")
+        self._surface_draw_guards.discard(surface.surface_id)
+        self._surface_copyright_text.pop(surface.surface_id, None)
+        self._surface_applied_status.pop(surface.surface_id, None)
+        self._basemap_diagnostics.pop(surface.surface_id, None)
+
+    def _on_preview_map_surface_event(
+        self,
+        surface: _PreviewMapSurface,
+        _event: object | None = None,
+    ) -> None:
+        if self._closing or not self._surface_is_active(surface):
+            return
+        changed = surface.scale_controller.refresh()
+        changed = self._refresh_attribution_artist(surface) or changed
+        if changed and surface.surface_id not in self._surface_draw_guards:
+            self._surface_draw_guards.add(surface.surface_id)
+            surface.canvas.draw_idle()
+        elif not changed:
+            self._surface_draw_guards.discard(surface.surface_id)
+        self._schedule_basemap_refresh(surface)
+
+    def _on_world_imagery_toggled(self, *_args: object) -> None:
+        if self._closing:
+            return
+        enabled = bool(self.world_imagery_var.get())
+        surfaces = self._active_map_surfaces()
+        if not enabled:
+            for surface in surfaces:
+                self._cancel_surface_debounce(surface)
+                surface.surface_generation += 1
+                if self._basemap_client is not None:
+                    self._basemap_client.cancel_surface(
+                        surface.surface_id,
+                        surface.surface_generation,
+                    )
+                surface.last_submitted_signature = None
+                surface.last_applied_signature = None
+            if self._basemap_client is not None:
+                self._basemap_client.clear_cache()
+            for surface in surfaces:
+                self._remove_basemap_artist(surface)
+                style_matplotlib_axes(surface.figure, surface.axes)
+                surface.scale_controller.refresh()
+                surface.status_var.set(
+                    "Imagery off"
+                    if surface.result_generation is not None
+                    else ""
+                )
+                surface.canvas.draw_idle()
+            return
+
+        if self._basemap_client is not None:
+            self._basemap_client.reset_transient_metadata_failure()
+        for surface in surfaces:
+            if surface.result_generation is None or surface.epsg is None:
+                surface.status_var.set("")
+                continue
+            surface.status_var.set("Imagery loading...")
+            self._schedule_basemap_refresh(surface)
+
+    def _schedule_basemap_refresh(self, surface: _PreviewMapSurface) -> None:
+        if (
+            self._closing
+            or not self._surface_is_active(surface)
+            or surface.result_generation is None
+            or surface.epsg is None
+        ):
+            self._cancel_surface_debounce(surface)
+            surface.status_var.set("")
+            return
+        if not self.world_imagery_var.get():
+            self._cancel_surface_debounce(surface)
+            surface.status_var.set("Imagery off")
+            return
+
+        candidate = self._current_projected_view(surface)
+        if candidate is None:
+            self._cancel_surface_debounce(surface)
+            surface.status_var.set("Imagery unavailable")
+            return
+        signature = self._projected_view_signature(candidate)
+        applied_signature = (
+            surface.last_applied_signature[1:]
+            if surface.last_applied_signature is not None
+            else None
+        )
+        image_attached = (
+            surface.basemap_image is not None
+            and any(
+                image is surface.basemap_image
+                for image in getattr(surface.axes, "images", ())
+            )
+        )
+        if signature == applied_signature and image_attached:
+            self._cancel_surface_debounce(surface)
+            if surface.last_submitted_signature != signature:
+                surface.surface_generation += 1
+                if self._basemap_client is not None:
+                    self._basemap_client.cancel_surface(
+                        surface.surface_id,
+                        surface.surface_generation,
+                    )
+            surface.last_submitted_signature = signature
+            surface.status_var.set(
+                self._surface_applied_status.get(surface.surface_id, "")
+            )
+            return
+        if signature == surface.last_submitted_signature:
+            return
+
+        self._cancel_surface_debounce(surface)
+        surface.status_var.set("Imagery loading...")
+
+        def submit_latest() -> None:
+            surface.debounce_after_id = None
+            if (
+                self._closing
+                or not self.world_imagery_var.get()
+                or not self._surface_is_active(surface)
+                or surface.result_generation is None
+                or surface.epsg is None
+            ):
+                return
+            current = self._current_projected_view(surface)
+            if current is None:
+                surface.status_var.set("Imagery unavailable")
+                return
+            current_signature = self._projected_view_signature(current)
+            if current_signature == surface.last_submitted_signature:
+                return
+            surface.surface_generation += 1
+            view = ProjectedView(
+                surface_id=surface.surface_id,
+                generation=surface.surface_generation,
+                result_generation=current.result_generation,
+                epsg=current.epsg,
+                xlim=current.xlim,
+                ylim=current.ylim,
+                pixel_width=current.pixel_width,
+                pixel_height=current.pixel_height,
+            )
+            surface.last_submitted_signature = current_signature
+            try:
+                client = self._get_basemap_client()
+                client.submit(view)
+                self._ensure_basemap_poller()
+            except Exception:
+                surface.status_var.set("Imagery unavailable")
+                self._basemap_diagnostics[surface.surface_id] = (
+                    "client",
+                    "Imagery support could not be started.",
+                )
+
+        try:
+            surface.debounce_after_id = self.root.after(
+                VIEW_DEBOUNCE_MS,
+                submit_latest,
+            )
+        except tk.TclError:
+            surface.debounce_after_id = None
+
+    def _current_projected_view(
+        self,
+        surface: _PreviewMapSurface,
+    ) -> ProjectedView | None:
+        if surface.result_generation is None or surface.epsg is None:
+            return None
+        try:
+            xlim = tuple(float(value) for value in surface.axes.get_xlim())
+            ylim = tuple(float(value) for value in surface.axes.get_ylim())
+            bounds = surface.axes.get_window_extent().bounds
+            width = max(1, int(round(float(bounds[2]))))
+            height = max(1, int(round(float(bounds[3]))))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if (
+            len(xlim) != 2
+            or len(ylim) != 2
+            or not all(math.isfinite(value) for value in (*xlim, *ylim))
+            or xlim[0] == xlim[1]
+            or ylim[0] == ylim[1]
+        ):
+            return None
+        scale = min(
+            1.0,
+            MAX_OUTPUT_DIMENSION / width,
+            MAX_OUTPUT_DIMENSION / height,
+            math.sqrt(MAX_OUTPUT_PIXELS / (width * height)),
+        )
+        pixel_width = max(1, int(math.floor(width * scale)))
+        pixel_height = max(1, int(math.floor(height * scale)))
+        return ProjectedView(
+            surface_id=surface.surface_id,
+            generation=surface.surface_generation,
+            result_generation=surface.result_generation,
+            epsg=surface.epsg,
+            xlim=(xlim[0], xlim[1]),
+            ylim=(ylim[0], ylim[1]),
+            pixel_width=pixel_width,
+            pixel_height=pixel_height,
+        )
+
+    @staticmethod
+    def _projected_view_signature(view: ProjectedView) -> tuple[object, ...]:
+        return (
+            view.surface_id,
+            view.result_generation,
+            view.epsg,
+            view.xlim,
+            view.ylim,
+            view.pixel_width,
+            view.pixel_height,
+        )
+
+    def _get_basemap_client(self):
+        if self._basemap_client is None:
+            self._basemap_client = self._basemap_client_factory()
+        return self._basemap_client
+
+    def _ensure_basemap_poller(self) -> None:
+        if self._closing or self._basemap_poll_after_id is not None:
+            return
+        try:
+            self._basemap_poll_after_id = self.root.after(
+                50,
+                self._run_basemap_poller,
+            )
+        except tk.TclError:
+            self._basemap_poll_after_id = None
+
+    def _run_basemap_poller(self) -> None:
+        self._basemap_poll_after_id = None
+        self._drain_basemap_queue()
+
+    def _drain_basemap_queue(self) -> None:
+        if self._closing:
+            return
+        client = self._basemap_client
+        if client is not None:
+            for _index in range(4):
+                response = client.poll()
+                if response is None:
+                    break
+                if isinstance(response, BasemapFrame):
+                    self._apply_basemap_frame(response)
+                elif isinstance(response, BasemapFailure):
+                    self._apply_basemap_failure(response)
+            self._ensure_basemap_poller()
+
+    def _apply_basemap_frame(self, frame: BasemapFrame) -> None:
+        surface = self._surface_for_id(frame.surface_id)
+        if (
+            surface is None
+            or not self.world_imagery_var.get()
+            or frame.generation != surface.surface_generation
+            or frame.result_generation != surface.result_generation
+            or frame.epsg != surface.epsg
+        ):
+            return
+        current = self._current_projected_view(surface)
+        if (
+            current is None
+            or frame.xlim != current.xlim
+            or frame.ylim != current.ylim
+            or frame.pixel_width != current.pixel_width
+            or frame.pixel_height != current.pixel_height
+        ):
+            return
+
+        axes = surface.axes
+        xlim = tuple(axes.get_xlim())
+        ylim = tuple(axes.get_ylim())
+        data_lim = axes.dataLim.frozen()
+        autoscale_x = bool(axes.get_autoscalex_on())
+        autoscale_y = bool(axes.get_autoscaley_on())
+        use_sticky_edges = bool(axes.use_sticky_edges)
+        aspect = axes.get_aspect()
+        adjustable = axes.get_adjustable()
+        anchor = axes.get_anchor()
+        try:
+            image_attached = (
+                surface.basemap_image is not None
+                and any(
+                    image is surface.basemap_image
+                    for image in axes.images
+                )
+            )
+            if image_attached:
+                surface.basemap_image.set_data(frame.rgba)
+                surface.basemap_image.set_extent(
+                    (frame.xlim[0], frame.xlim[1], frame.ylim[0], frame.ylim[1])
+                )
+                surface.basemap_image.set_zorder(-100)
+            else:
+                surface.basemap_image = axes.imshow(
+                    frame.rgba,
+                    extent=(
+                        frame.xlim[0],
+                        frame.xlim[1],
+                        frame.ylim[0],
+                        frame.ylim[1],
+                    ),
+                    origin="upper",
+                    interpolation="bilinear",
+                    zorder=-100,
+                )
+            surface.basemap_image.sticky_edges.x[:] = []
+            surface.basemap_image.sticky_edges.y[:] = []
+        finally:
+            axes.dataLim.set(data_lim)
+            axes.use_sticky_edges = use_sticky_edges
+            axes.set_aspect(aspect, adjustable=adjustable, anchor=anchor)
+            axes.set_xlim(xlim, auto=autoscale_x)
+            axes.set_ylim(ylim, auto=autoscale_y)
+            axes.set_autoscalex_on(autoscale_x)
+            axes.set_autoscaley_on(autoscale_y)
+            axes.dataLim.set(data_lim)
+
+        self._surface_copyright_text[surface.surface_id] = frame.copyright_text
+        self._refresh_attribution_artist(surface, frame.copyright_text)
+        surface.last_applied_signature = (
+            frame.generation,
+            *self._projected_view_signature(current),
+        )
+        applied_status = "Imagery partial" if frame.is_partial else ""
+        self._surface_applied_status[surface.surface_id] = applied_status
+        surface.status_var.set(applied_status)
+        self._basemap_diagnostics.pop(surface.surface_id, None)
+        surface.canvas.draw_idle()
+
+    def _apply_basemap_failure(self, failure: BasemapFailure) -> None:
+        surface = self._surface_for_id(failure.surface_id)
+        if (
+            surface is None
+            or not self.world_imagery_var.get()
+            or failure.generation != surface.surface_generation
+            or failure.result_generation != surface.result_generation
+        ):
+            return
+        self._remove_basemap_artist(surface)
+        style_matplotlib_axes(surface.figure, surface.axes)
+        surface.scale_controller.refresh()
+        surface.last_applied_signature = None
+        surface.status_var.set("Imagery unavailable")
+        category = (
+            failure.category
+            if failure.category in BASEMAP_FAILURE_DIAGNOSTICS
+            else "imagery_error"
+        )
+        self._basemap_diagnostics[surface.surface_id] = (
+            category,
+            BASEMAP_FAILURE_DIAGNOSTICS[category],
+        )
+        surface.canvas.draw_idle()
+
+    def _remove_basemap_artist(self, surface: _PreviewMapSurface) -> None:
+        for image in list(getattr(surface.axes, "images", ())):
+            try:
+                image.remove()
+            except (AttributeError, ValueError):
+                pass
+        surface.basemap_image = None
+        if surface.attribution_artist is not None:
+            try:
+                surface.attribution_artist.remove()
+            except (AttributeError, ValueError):
+                pass
+        surface.attribution_artist = None
+        self._surface_copyright_text.pop(surface.surface_id, None)
+        self._surface_applied_status.pop(surface.surface_id, None)
+
+    def _refresh_attribution_artist(
+        self,
+        surface: _PreviewMapSurface,
+        copyright_text: str | None = None,
+    ) -> bool:
+        if copyright_text is not None:
+            self._surface_copyright_text[surface.surface_id] = copyright_text
+        provider_text = self._surface_copyright_text.get(surface.surface_id)
+        image_attached = (
+            surface.basemap_image is not None
+            and any(
+                image is surface.basemap_image
+                for image in getattr(surface.axes, "images", ())
+            )
+        )
+        if not provider_text or not image_attached:
+            if surface.attribution_artist is None:
+                return False
+            try:
+                surface.attribution_artist.remove()
+            except (AttributeError, ValueError):
+                pass
+            surface.attribution_artist = None
+            return True
+
+        created = False
+        if (
+            surface.attribution_artist is None
+            or not any(
+                artist is surface.attribution_artist
+                for artist in getattr(surface.axes, "texts", ())
+            )
+        ):
+            surface.attribution_artist = surface.axes.text(
+                0.03,
+                0.97,
+                "",
+                transform=surface.axes.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                linespacing=0.9,
+                color="#F8FAFC",
+                clip_on=False,
+                zorder=1010,
+                parse_math=False,
+                bbox={
+                    "boxstyle": "round,pad=0.35",
+                    "facecolor": "#0B1220",
+                    "edgecolor": "#CBD5E1",
+                    "linewidth": 0.7,
+                    "alpha": 0.84,
+                },
+            )
+            surface.attribution_artist.set_gid(
+                "jpg-boundary-basemap-attribution"
+            )
+            created = True
+
+        full_text = f"Powered by Esri | {provider_text}"
+        previous_text = surface.attribution_artist.get_text()
+        wrapped = self._wrap_attribution_text(
+            surface,
+            surface.attribution_artist,
+            full_text,
+        )
+        surface.attribution_artist.set_text(previous_text)
+        changed = previous_text != wrapped
+        if changed:
+            surface.attribution_artist.set_text(wrapped)
+        return created or changed
+
+    def _wrap_attribution_text(
+        self,
+        surface: _PreviewMapSurface,
+        artist: object,
+        text: str,
+    ) -> str:
+        try:
+            axes_width = float(surface.axes.get_window_extent().width)
+        except (AttributeError, TypeError, ValueError):
+            axes_width = 640.0
+        reserved_width = (
+            0
+            if surface.surface_id.startswith("inspector:")
+            else max(PREVIEW_KEY_PANEL_WIDTH, SETTINGS_DRAWER_WIDTH) + 24
+        )
+        max_width = max(
+            90.0,
+            axes_width - reserved_width - (axes_width * 0.03) - 18.0,
+        )
+        try:
+            renderer = surface.figure.canvas.get_renderer()
+        except (AttributeError, RuntimeError):
+            renderer = None
+
+        def fits(candidate: str) -> bool:
+            if renderer is None:
+                return len(candidate) <= max(8, int(max_width / 5.5))
+            try:
+                artist.set_text(candidate)
+                return artist.get_window_extent(renderer=renderer).width <= max_width
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                return len(candidate) <= max(8, int(max_width / 5.5))
+
+        lines: list[str] = []
+        current = ""
+        for token in text.split(" "):
+            candidate = token if not current else f"{current} {token}"
+            if fits(candidate):
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = ""
+            remaining = token
+            while remaining:
+                if fits(remaining):
+                    current = remaining
+                    remaining = ""
+                    break
+                low = 1
+                high = len(remaining)
+                best = 1
+                while low <= high:
+                    middle = (low + high) // 2
+                    if fits(remaining[:middle]):
+                        best = middle
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                lines.append(remaining[:best])
+                remaining = remaining[best:]
+        if current:
+            lines.append(current)
+        return "\n".join(lines)
+
+    def _shutdown_basemap(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        if self._main_map_surface is not None:
+            self._reset_preview_map_surface(self._main_map_surface)
+        if self._fullscreen_window_exists():
+            self._close_fullscreen_preview()
+        poll_after_id = self._basemap_poll_after_id
+        self._basemap_poll_after_id = None
+        if poll_after_id is not None:
+            try:
+                self.root.after_cancel(poll_after_id)
+            except tk.TclError:
+                pass
+        if self._basemap_client is not None:
+            self._basemap_client.shutdown()
+            self._basemap_client.clear_cache()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def _build_empty_input_overlay(self, parent: ttk.Frame) -> None:
         self.empty_input_overlay = ttk.Frame(
@@ -1397,6 +2143,8 @@ class BoundaryKmzApp:
         self._preview_error = ""
         if hasattr(self, "axes"):
             self._draw_empty_preview()
+        if self._basemap_client is not None:
+            self._basemap_client.clear_cache()
         self._refresh_preview_state_badge()
 
     def _refresh_stale_from_signature(self, reason: str) -> None:
@@ -2464,12 +3212,19 @@ class BoundaryKmzApp:
         )
 
     def _draw_preview(self, result: BoundaryResult) -> None:
+        if result is not self._map_result_reference:
+            self._accepted_result_generation += 1
+            self._active_result_generation = self._accepted_result_generation
+            self._map_result_reference = result
+        if self._main_map_surface is None:
+            return
         self._draw_preview_on_axes(
             result,
             self.axes,
             self.figure,
             self.canvas,
             self.preview_key_content,
+            self._main_map_surface,
         )
         self._draw_fullscreen_preview(result)
 
@@ -2480,18 +3235,30 @@ class BoundaryKmzApp:
         figure: Figure,
         canvas: FigureCanvasTkAgg | None,
         key_content: ttk.Frame | None,
+        surface: _PreviewMapSurface,
     ) -> None:
+        self._reset_preview_map_surface(surface)
         axes.clear()
         style_matplotlib_axes(figure, axes)
         key_entries: list[tuple[str, str, str, float]] = []
         if result.metadata.input_type == "JPG folder":
-            axes.scatter(
+            point_artist = axes.scatter(
                 result.projected_points[:, 0],
                 result.projected_points[:, 1],
                 s=4,
                 color="#1f77b4",
                 linewidths=0,
                 label="JPG GPS points",
+                zorder=25,
+            )
+            point_artist.set_path_effects(
+                [
+                    patheffects.Stroke(
+                        linewidth=2.0,
+                        foreground=PALETTE.BACKGROUND_DEEP,
+                    ),
+                    patheffects.Normal(),
+                ]
             )
             key_entries.append(("JPG GPS points", "#1f77b4", "point", 1.0))
         else:
@@ -2501,26 +3268,30 @@ class BoundaryKmzApp:
                 if "polyline" in result.metadata.input_type.lower()
                 else "Source polygon"
             )
-            axes.plot(
+            source_line = axes.plot(
                 bx,
                 by,
                 color="#1f77b4",
                 linewidth=1.4,
                 linestyle=":",
                 label=source_label,
-            )
+                zorder=20,
+            )[0]
+            self._style_preview_vector_artist(source_line, 1.4)
             key_entries.append((source_label, "#1f77b4", ":", 1.4))
 
         if result.sections:
             x, y = self._preview_polygon_xy(result.final_polygon_projected)
-            axes.plot(
+            parent_line = axes.plot(
                 x,
                 y,
                 color="#9ca3af",
                 linewidth=1.4,
                 linestyle="--",
                 label="Parent outline",
-            )
+                zorder=20,
+            )[0]
+            self._style_preview_vector_artist(parent_line, 1.4)
             key_entries.append(("Parent outline", "#9ca3af", "--", 1.4))
             section_colors = [
                 "#d62728",
@@ -2537,19 +3308,29 @@ class BoundaryKmzApp:
             for section in result.sections:
                 color = section_colors[(section.index - 1) % len(section_colors)]
                 sx, sy = self._preview_polygon_xy(section.polygon_projected)
-                axes.plot(
+                section_line = axes.plot(
                     sx,
                     sy,
                     color=color,
                     linewidth=1.8,
                     label=section.display_name,
-                )
-                axes.fill(sx, sy, color=color, alpha=0.08)
+                    zorder=22,
+                )[0]
+                self._style_preview_vector_artist(section_line, 1.8)
+                axes.fill(sx, sy, color=color, alpha=0.08, zorder=10)
                 key_entries.append((section.display_name, color, "-", 1.8))
         else:
             x, y = self._preview_polygon_xy(result.final_polygon_projected)
-            axes.plot(x, y, color="#d62728", linewidth=2.0, label="KMZ boundary")
-            axes.fill(x, y, color="#d62728", alpha=0.08)
+            boundary_line = axes.plot(
+                x,
+                y,
+                color="#d62728",
+                linewidth=2.0,
+                label="KMZ boundary",
+                zorder=22,
+            )[0]
+            self._style_preview_vector_artist(boundary_line, 2.0)
+            axes.fill(x, y, color="#d62728", alpha=0.08, zorder=10)
             key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
 
         self._fit_preview_axes_to_result(result, axes)
@@ -2557,9 +3338,34 @@ class BoundaryKmzApp:
         axes.set_axis_off()
         axes.format_coord = lambda _x, _y: ""
         figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        result_generation = self._active_result_generation
+        epsg = (
+            int(result.metadata.epsg)
+            if result_generation is not None
+            else None
+        )
+        self._bind_preview_map_surface(
+            surface,
+            result_generation,
+            epsg,
+        )
         self._update_preview_key(key_content, key_entries)
         if canvas is not None:
             canvas.draw_idle()
+        self._schedule_basemap_refresh(surface)
+
+    @staticmethod
+    def _style_preview_vector_artist(artist: object, linewidth: float) -> None:
+        artist.set_path_effects(
+            [
+                patheffects.Stroke(
+                    linewidth=linewidth + 2.2,
+                    foreground=PALETTE.BACKGROUND_DEEP,
+                    alpha=0.9,
+                ),
+                patheffects.Normal(),
+            ]
+        )
 
     def _update_preview_key(
         self,
@@ -2694,22 +3500,28 @@ class BoundaryKmzApp:
         return decimated_x, decimated_y
 
     def _draw_empty_preview(self) -> None:
-        self._draw_empty_preview_on_axes(
-            self.axes,
-            self.figure,
-            getattr(self, "canvas", None),
-        )
+        self._active_result_generation = None
+        self._map_result_reference = None
+        if self._main_map_surface is not None:
+            self._draw_empty_preview_on_axes(
+                self.axes,
+                self.figure,
+                getattr(self, "canvas", None),
+                self._main_map_surface,
+            )
         self._update_preview_key(getattr(self, "preview_key_content", None), [])
         if (
             self._fullscreen_window_exists()
             and self._fullscreen_axes is not None
             and self._fullscreen_figure is not None
             and self._fullscreen_canvas is not None
+            and self._fullscreen_map_surface is not None
         ):
             self._draw_empty_preview_on_axes(
                 self._fullscreen_axes,
                 self._fullscreen_figure,
                 self._fullscreen_canvas,
+                self._fullscreen_map_surface,
             )
             self._update_preview_key(self._fullscreen_key_content, [])
 
@@ -2718,7 +3530,9 @@ class BoundaryKmzApp:
         axes: object,
         figure: Figure,
         canvas: FigureCanvasTkAgg | None,
+        surface: _PreviewMapSurface,
     ) -> None:
+        self._reset_preview_map_surface(surface)
         axes.clear()
         style_matplotlib_axes(figure, axes)
         axes.set_axis_off()
@@ -2778,8 +3592,10 @@ class BoundaryKmzApp:
             value=self.split_direction_degrees_var.get(),
         )
         self._fullscreen_status_var = tk.StringVar(master=window, value="Ready.")
+        self._fullscreen_imagery_status_var = tk.StringVar(master=window, value="")
 
-        ttk.Label(controls, text="# Shapes").grid(row=0, column=0, sticky="w")
+        section_count_label = ttk.Label(controls, text="# Shapes")
+        section_count_label.grid(row=0, column=0, sticky="w")
         section_spinbox = ttk.Spinbox(
             controls,
             from_=1,
@@ -2846,16 +3662,21 @@ class BoundaryKmzApp:
             command=self._apply_fullscreen_preview,
         )
         self._fullscreen_apply_button.grid(row=0, column=10, sticky="w", padx=(0, 8))
-        ttk.Label(controls, textvariable=self._fullscreen_status_var).grid(
+        fullscreen_status_label = ttk.Label(
+            controls,
+            textvariable=self._fullscreen_status_var,
+        )
+        fullscreen_status_label.grid(
             row=0,
             column=11,
             sticky="w",
         )
-        ttk.Button(
+        fullscreen_close_button = ttk.Button(
             controls,
             text="Close",
             command=self._close_fullscreen_preview,
-        ).grid(row=0, column=12, sticky="e", padx=(8, 0))
+        )
+        fullscreen_close_button.grid(row=0, column=12, sticky="e", padx=(8, 0))
 
         self._fullscreen_section_widgets = [
             overlap_label,
@@ -2911,15 +3732,290 @@ class BoundaryKmzApp:
             self._scroll_fullscreen_preview_key,
         )
         self._fullscreen_key_frame.grid(row=0, column=1, sticky="ns", padx=(8, 8))
+
+        fullscreen_toolbar_frame = ttk.Frame(window, style="Toolbar.TFrame")
+        fullscreen_toolbar_frame.grid(row=2, column=0, sticky="ew")
+        fullscreen_toolbar_frame.columnconfigure(0, weight=1)
         self._fullscreen_toolbar = NavigationToolbar2Tk(
             self._fullscreen_canvas,
-            window,
+            fullscreen_toolbar_frame,
             pack_toolbar=False,
         )
         self._fullscreen_toolbar.update()
         self._disable_toolbar_coordinate_message(self._fullscreen_toolbar)
         style_navigation_toolbar(self._fullscreen_toolbar)
-        self._fullscreen_toolbar.grid(row=2, column=0, sticky="ew")
+        self._fullscreen_toolbar.grid(row=0, column=0, sticky="ew")
+        fullscreen_view_controls = ttk.Frame(
+            fullscreen_toolbar_frame,
+            style="Toolbar.TFrame",
+        )
+        fullscreen_view_controls.grid(row=0, column=1, sticky="e", padx=(8, 6))
+        self._fullscreen_imagery_checkbutton = ttk.Checkbutton(
+            fullscreen_view_controls,
+            text="World Imagery",
+            variable=self.world_imagery_var,
+            style="Surface.TCheckbutton",
+        )
+        self._fullscreen_imagery_checkbutton.grid(row=0, column=0, sticky="e")
+        self._fullscreen_imagery_status_label = ttk.Label(
+            fullscreen_view_controls,
+            textvariable=self._fullscreen_imagery_status_var,
+            style="Surface.Secondary.TLabel",
+            anchor="e",
+            width=20,
+        )
+        self._fullscreen_imagery_status_label.grid(
+            row=0,
+            column=1,
+            sticky="e",
+            padx=(8, 0),
+        )
+
+        inspector_layout_state: dict[str, bool | None] = {"compact": None}
+
+        def resize_inspector_key_labels() -> None:
+            if (
+                self._fullscreen_key_canvas is None
+                or self._fullscreen_key_content is None
+            ):
+                return
+            try:
+                key_width = int(self._fullscreen_key_canvas.cget("width"))
+            except (tk.TclError, TypeError, ValueError):
+                return
+            wraplength = max(48, key_width - 60)
+            for child in self._fullscreen_key_content.winfo_children():
+                try:
+                    if (
+                        child.winfo_class() == "TLabel"
+                        and int(float(child.cget("wraplength"))) != wraplength
+                    ):
+                        child.configure(wraplength=wraplength)
+                except (tk.TclError, TypeError, ValueError):
+                    continue
+
+        def layout_inspector(event: object | None = None) -> None:
+            if (
+                event is not None
+                and getattr(event, "widget", None) is not window
+            ):
+                return
+            if (
+                self._fullscreen_window is not window
+                or self._fullscreen_key_frame is None
+                or self._fullscreen_key_canvas is None
+            ):
+                return
+            width = int(getattr(event, "width", window.winfo_width()))
+            compact = width < 1200
+            key_width = 120 if width <= 900 else PREVIEW_KEY_PANEL_WIDTH
+            self._fullscreen_key_frame.configure(width=key_width)
+            self._fullscreen_key_canvas.configure(width=key_width)
+            resize_inspector_key_labels()
+            if inspector_layout_state["compact"] == compact:
+                return
+            inspector_layout_state["compact"] = compact
+            for column in range(13):
+                controls.columnconfigure(column, weight=0)
+            if compact:
+                controls.columnconfigure(5, weight=1)
+                section_count_label.grid_configure(
+                    row=0,
+                    column=0,
+                    columnspan=1,
+                    sticky="w",
+                    padx=0,
+                )
+                section_spinbox.grid_configure(
+                    row=0,
+                    column=1,
+                    columnspan=1,
+                    sticky="w",
+                    padx=(4, 12),
+                )
+                overlap_label.grid_configure(
+                    row=0,
+                    column=2,
+                    columnspan=1,
+                    sticky="w",
+                    padx=0,
+                )
+                overlap_entry.grid_configure(
+                    row=0,
+                    column=3,
+                    columnspan=1,
+                    sticky="w",
+                    padx=(4, 12),
+                )
+                shape_label.grid_configure(
+                    row=0,
+                    column=4,
+                    columnspan=1,
+                    sticky="w",
+                    padx=0,
+                )
+                shape_entry.grid_configure(
+                    row=0,
+                    column=5,
+                    columnspan=1,
+                    sticky="ew",
+                    padx=(4, 0),
+                )
+                split_label.grid_configure(
+                    row=1,
+                    column=0,
+                    columnspan=1,
+                    sticky="w",
+                    padx=0,
+                    pady=(5, 0),
+                )
+                self._fullscreen_split_direction_combo.grid_configure(
+                    row=1,
+                    column=1,
+                    columnspan=2,
+                    sticky="w",
+                    padx=(4, 12),
+                    pady=(5, 0),
+                )
+                self._fullscreen_split_direction_custom_label.grid_configure(
+                    row=1,
+                    column=3,
+                    columnspan=1,
+                    sticky="w",
+                    padx=0,
+                    pady=(5, 0),
+                )
+                self._fullscreen_split_direction_custom_entry.grid_configure(
+                    row=1,
+                    column=4,
+                    columnspan=1,
+                    sticky="w",
+                    padx=(4, 12),
+                    pady=(5, 0),
+                )
+                self._fullscreen_apply_button.grid_configure(
+                    row=2,
+                    column=0,
+                    columnspan=2,
+                    sticky="w",
+                    padx=(0, 8),
+                    pady=(5, 0),
+                )
+                fullscreen_status_label.grid_configure(
+                    row=2,
+                    column=2,
+                    columnspan=3,
+                    sticky="w",
+                    padx=0,
+                    pady=(5, 0),
+                )
+                fullscreen_close_button.grid_configure(
+                    row=2,
+                    column=5,
+                    columnspan=1,
+                    sticky="e",
+                    padx=(8, 0),
+                    pady=(5, 0),
+                )
+                return
+
+            controls.columnconfigure(11, weight=1)
+            section_count_label.grid_configure(
+                row=0, column=0, columnspan=1, sticky="w", padx=0, pady=0
+            )
+            section_spinbox.grid_configure(
+                row=0,
+                column=1,
+                columnspan=1,
+                sticky="w",
+                padx=(4, 12),
+                pady=0,
+            )
+            overlap_label.grid_configure(
+                row=0, column=2, columnspan=1, sticky="w", padx=0, pady=0
+            )
+            overlap_entry.grid_configure(
+                row=0,
+                column=3,
+                columnspan=1,
+                sticky="w",
+                padx=(4, 12),
+                pady=0,
+            )
+            shape_label.grid_configure(
+                row=0, column=4, columnspan=1, sticky="w", padx=0, pady=0
+            )
+            shape_entry.grid_configure(
+                row=0,
+                column=5,
+                columnspan=1,
+                sticky="ew",
+                padx=(4, 12),
+                pady=0,
+            )
+            split_label.grid_configure(
+                row=0, column=6, columnspan=1, sticky="w", padx=0, pady=0
+            )
+            self._fullscreen_split_direction_combo.grid_configure(
+                row=0,
+                column=7,
+                columnspan=1,
+                sticky="w",
+                padx=(4, 12),
+                pady=0,
+            )
+            self._fullscreen_split_direction_custom_label.grid_configure(
+                row=0, column=8, columnspan=1, sticky="w", padx=0, pady=0
+            )
+            self._fullscreen_split_direction_custom_entry.grid_configure(
+                row=0,
+                column=9,
+                columnspan=1,
+                sticky="w",
+                padx=(4, 12),
+                pady=0,
+            )
+            self._fullscreen_apply_button.grid_configure(
+                row=0,
+                column=10,
+                columnspan=1,
+                sticky="w",
+                padx=(0, 8),
+                pady=0,
+            )
+            fullscreen_status_label.grid_configure(
+                row=0,
+                column=11,
+                columnspan=1,
+                sticky="w",
+                padx=0,
+                pady=0,
+            )
+            fullscreen_close_button.grid_configure(
+                row=0,
+                column=12,
+                columnspan=1,
+                sticky="e",
+                padx=(8, 0),
+                pady=0,
+            )
+
+        window.bind("<Configure>", layout_inspector, add="+")
+        self._fullscreen_key_content.bind(
+            "<Configure>",
+            lambda _event: resize_inspector_key_labels(),
+            add="+",
+        )
+        layout_inspector()
+
+        self._fullscreen_surface_serial += 1
+        self._fullscreen_map_surface = self._create_preview_map_surface(
+            f"inspector:{self._fullscreen_surface_serial}",
+            self._fullscreen_axes,
+            self._fullscreen_figure,
+            self._fullscreen_canvas,
+            self._fullscreen_imagery_status_var,
+        )
         self._fullscreen_event_cids = self._register_preview_canvas_interactions(
             self._fullscreen_canvas,
             self._fullscreen_axes,
@@ -3064,6 +4160,7 @@ class BoundaryKmzApp:
             self._fullscreen_axes is None
             or self._fullscreen_figure is None
             or self._fullscreen_canvas is None
+            or self._fullscreen_map_surface is None
         ):
             return
 
@@ -3074,6 +4171,7 @@ class BoundaryKmzApp:
                 self._fullscreen_axes,
                 self._fullscreen_figure,
                 self._fullscreen_canvas,
+                self._fullscreen_map_surface,
             )
             self._update_preview_key(self._fullscreen_key_content, [])
             return
@@ -3084,6 +4182,7 @@ class BoundaryKmzApp:
             self._fullscreen_figure,
             self._fullscreen_canvas,
             self._fullscreen_key_content,
+            self._fullscreen_map_surface,
         )
 
     def _set_fullscreen_status(self, status: str) -> None:
@@ -3127,6 +4226,16 @@ class BoundaryKmzApp:
         )
 
     def _close_fullscreen_preview(self) -> None:
+        map_surface = self._fullscreen_map_surface
+        if map_surface is not None:
+            self._reset_preview_map_surface(map_surface, deregister=True)
+            for cid in map_surface.observer_event_cids:
+                try:
+                    map_surface.canvas.mpl_disconnect(cid)
+                except Exception:
+                    pass
+            map_surface.observer_event_cids = []
+
         if self._fullscreen_canvas is not None:
             for cid in self._fullscreen_event_cids:
                 try:
@@ -3140,11 +4249,15 @@ class BoundaryKmzApp:
         self._fullscreen_figure = None
         self._fullscreen_axes = None
         self._fullscreen_canvas = None
+        self._fullscreen_map_surface = None
         self._fullscreen_toolbar = None
+        self._fullscreen_imagery_checkbutton = None
+        self._fullscreen_imagery_status_label = None
         self._fullscreen_key_frame = None
         self._fullscreen_key_canvas = None
         self._fullscreen_key_content = None
         self._fullscreen_status_var = None
+        self._fullscreen_imagery_status_var = None
         self._fullscreen_section_count_var = None
         self._fullscreen_overlap_var = None
         self._fullscreen_shape_label_var = None
