@@ -72,3 +72,14 @@ def rectangle_trace_xy(width: float = 100.0, height: float = 60.0) -> list[tuple
         (0, 40),
         (0, 20),
     ]
+
+
+def sample_closed_ring_xy(
+    vertices: list[tuple[float, float]], spacing: float = 10.0
+) -> list[tuple[float, float]]:
+    """Sample each edge in flight order, leaving one photo interval at closure."""
+    coordinates = []
+    for start, end in zip(vertices, vertices[1:] + vertices[:1]):
+        count = max(1, int(np.ceil(np.linalg.norm(np.subtract(end, start)) / spacing)))
+        coordinates.extend(tuple(point) for point in np.linspace(start, end, count, endpoint=False))
+    return coordinates

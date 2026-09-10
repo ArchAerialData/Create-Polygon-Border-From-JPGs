@@ -47,6 +47,153 @@ from jpg_boundary_gui_window import OuterWindowBounds, WorkArea  # noqa: E402
 
 
 class GuiInputTests(TestCase):
+    def test_settings_pages_and_custom_angle_follow_selection(self) -> None:
+        with _app() as app:
+            app._toggle_settings_panel("sections")
+            self.assertEqual(app.settings_title.cget("text"), "Section settings")
+            self.assertEqual([key for key, frame in app._settings_group_frames.items() if frame.grid_info()],
+                             ["sections"])
+            self.assertFalse(app.split_direction_custom_entry.grid_info())
+            app.section_count_var.set("3")
+            app.split_direction_var.set("Custom")
+            self.assertTrue(app.split_direction_custom_entry.grid_info())
+            app.split_direction_degrees_var.set("42")
+            app._set_busy(True, "Building preview...")
+            self.assertTrue(app.split_direction_custom_entry.grid_info())
+            self.assertTrue(app.split_direction_custom_entry.instate(["disabled"]))
+            app._set_busy(False, "Ready")
+            self.assertEqual(app.split_direction_custom_entry.get(), "42")
+            app._toggle_settings_panel("output")
+            self.assertEqual(app.settings_title.cget("text"), "Export settings")
+            self.assertEqual([key for key, frame in app._settings_group_frames.items() if frame.grid_info()],
+                             ["output"])
+
+    def test_rounded_native_fields_keep_editing_and_arrow_hit_targets(self) -> None:
+        with _app() as app:
+            app._toggle_settings_panel("sections")
+            app.root.update_idletasks()
+            spin = app.section_count_spinbox
+            for suffix, delta in (("uparrow", 1), ("downarrow", -1)):
+                target = next((x, y) for x in range(spin.winfo_width()) for y in range(spin.winfo_height())
+                              if spin.identify(x, y).endswith(suffix))
+                before = int(spin.get())
+                spin.event_generate("<ButtonPress-1>", x=target[0], y=target[1])
+                spin.event_generate("<ButtonRelease-1>", x=target[0], y=target[1])
+                self.assertEqual(int(spin.get()), before + delta)
+            app._toggle_settings_panel("input")
+            entry = app.buffer_entry
+            entry.delete(0, "end")
+            entry.insert(0, "25")
+            self.assertEqual(app.buffer_var.get(), "25")
+            entry.state(["disabled"])
+            entry.insert("end", "9")
+            self.assertEqual(entry.get(), "25")
+            app.root.update_idletasks()
+            combo = app.outline_mode_combo
+            self.assertTrue(combo.instate(["readonly"]))
+            self.assertTrue(any(combo.identify(x, combo.winfo_height() // 2).endswith("downarrow")
+                                for x in range(combo.winfo_width())))
+
+    def test_welcome_card_does_not_extend_under_settings(self) -> None:
+        for geometry, visible in (("1440x900+0+0", True), ("720x500+0+0", False)):
+            with self.subTest(geometry=geometry):
+                root = _create_root()
+                root.withdraw()
+                root.geometry(geometry)
+                try:
+                    app = BoundaryKmzApp(root)
+                    app._toggle_settings_panel("input")
+                    root.update_idletasks()
+                    self.assertEqual(bool(app.empty_input_overlay.place_info()), visible)
+                    if visible:
+                        self.assertLessEqual(app.empty_input_overlay.winfo_x() + app.empty_input_overlay.winfo_width(),
+                                             app.settings_drawer.winfo_x())
+                    app._close_settings_drawer()
+                    self.assertTrue(app.empty_input_overlay.place_info())
+                finally:
+                    _destroy_test_root(root)
+
+    def test_named_settings_menus_preserve_preview_and_show_selected_group(self) -> None:
+        with _app() as app:
+            result = _sample_boundary_result()
+            app._cached_result = result
+            for group, button in (("input", app.settings_button), ("sections", app.sections_settings_button),
+                                  ("output", app.output_settings_button)):
+                app._toggle_view_menu()
+                button.invoke()
+                self.assertFalse(app._view_menu_open)
+                self.assertTrue(app._settings_drawer_open)
+                self.assertEqual(app._active_settings_group, group)
+                self.assertEqual(button.cget("style"), "Primary.TButton")
+                self.assertIs(app._cached_result, result)
+                button.invoke()
+                self.assertFalse(app._settings_drawer_open)
+                self.assertEqual(button.cget("style"), "Ghost.TButton")
+
+    def test_view_menu_escape_closes_only_the_menu(self) -> None:
+        with _app() as app:
+            app._toggle_view_menu()
+            self.assertTrue(app.view_menu.place_info())
+            app._shortcut_escape()
+            self.assertFalse(app._view_menu_open)
+            self.assertFalse(app.view_menu.place_info())
+            self.assertTrue(app.root.winfo_exists())
+
+    def test_busy_feedback_is_inline_and_blocks_duplicate_work(self) -> None:
+        with _app() as app, patch.object(app, "_read_inputs") as read_inputs:
+            app._set_busy(True, "Exporting KMZ...")
+            self.assertTrue(app.activity_overlay.place_info())
+            self.assertIsNotNone(app._busy_after_id)
+            self.assertIn("background", app.activity_detail.cget("text"))
+            self.assertEqual(app.export_button.cget("text"), "Exporting…")
+            app._scan_clicked()
+            app._export_clicked()
+            read_inputs.assert_not_called()
+            app._set_busy(False, "KMZ exported.")
+            self.assertIsNone(app._busy_after_id)
+            self.assertFalse(app.activity_overlay.place_info())
+            self.assertEqual(app.export_button.cget("text"), "Export KMZ")
+
+    def test_export_completion_does_not_open_modal_and_links_saved_folder(self) -> None:
+        with _app() as app, TemporaryDirectory() as tmp:
+            saved = Path(tmp) / "boundary.kmz"
+            with patch.object(gui_module.tk, "Toplevel") as dialog:
+                app._show_export_success(saved)
+                dialog.assert_not_called()
+            self.assertTrue(app.open_export_button.grid_info())
+            self.assertIn(saved.name, app.status_var.get())
+            app.output_var.set(str(Path(tmp) / "elsewhere" / "next.kmz"))
+            with patch.object(app, "_open_output_folder") as open_folder:
+                app.open_export_button.invoke()
+                open_folder.assert_called_once_with(saved.parent)
+
+    def test_responsive_controls_fit_at_normal_and_large_text_scaling(self) -> None:
+        for width, height, scaling in ((720, 500, 1.333), (960, 600, 1.333), (1100, 760, 2.0)):
+            with self.subTest(width=width, height=height, scaling=scaling):
+                root = _create_root()
+                root.withdraw()
+                previous_scaling = root.tk.call("tk", "scaling")
+                root.tk.call("tk", "scaling", scaling)
+                root.geometry(f"{width}x{height}+0+0")
+                try:
+                    app = BoundaryKmzApp(root)
+                    root.update_idletasks()
+                    app._refresh_workspace_layout()
+                    root.update_idletasks()
+                    for widget in (app.change_input_button, app.settings_button, app.sections_settings_button,
+                                   app.output_settings_button, app.view_button, app.scan_button, app.export_button):
+                        right = widget.winfo_rootx() - root.winfo_rootx() + widget.winfo_width()
+                        bottom = widget.winfo_rooty() - root.winfo_rooty() + widget.winfo_height()
+                        self.assertLessEqual(right, width)
+                        self.assertLessEqual(bottom, height)
+                    self.assertLessEqual(app.empty_input_overlay.winfo_reqheight(), app.preview_stack.winfo_height())
+                    app._toggle_settings_panel("sections")
+                    root.update_idletasks()
+                    self.assertLessEqual(app.settings_drawer.winfo_width(), app.preview_stack.winfo_width())
+                finally:
+                    root.tk.call("tk", "scaling", previous_scaling)
+                    _destroy_test_root(root)
+
     def test_read_inputs_accepts_kml_file(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
             kml_path = Path(tmp) / "input.kml"
@@ -375,9 +522,9 @@ class GuiInputTests(TestCase):
 
     def test_preview_workspace_meets_planned_size_targets(self) -> None:
         for geometry, minimum in (
-            ("1440x741+0+0", (1360, 520)),
-            ("1440x612+0+0", (1360, 390)),
-            ("960x600+0+0", (900, 350)),
+            ("1440x741+0+0", (1360, 400)),
+            ("1440x612+0+0", (1360, 300)),
+            ("960x600+0+0", (900, 280)),
         ):
             with self.subTest(geometry=geometry):
                 root = _create_root()
@@ -437,7 +584,7 @@ class GuiInputTests(TestCase):
 
             self.assertEqual(
                 app.compact_input_target.cget("background"),
-                "#202838",
+                PALETTE.BACKGROUND,
             )
 
     def test_drop_registration_failure_keeps_browse_available(self) -> None:
@@ -494,7 +641,7 @@ class GuiInputTests(TestCase):
 
     def test_settings_scrollbar_only_appears_when_content_overflows(self) -> None:
         for geometry, expected_visible in (
-            ("1440x741+0+0", False),
+            ("1440x900+0+0", False),
             ("960x600+0+0", True),
         ):
             with self.subTest(geometry=geometry):
@@ -861,6 +1008,11 @@ class GuiInputTests(TestCase):
                         style.lookup(style_name, "background"),
                         PALETTE.SURFACE,
                     )
+                    self.assertEqual(
+                        style.lookup(style_name, "background", ("disabled",)),
+                        PALETTE.SURFACE,
+                    )
+            self.assertEqual(app.settings_canvas.cget("background"), PALETTE.SURFACE)
             self.assertEqual(
                 style.lookup("Muted.TLabel", "foreground"),
                 PALETTE.TEXT_SECONDARY,

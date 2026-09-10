@@ -33,68 +33,58 @@ relative to its own location.
 
 In the app:
 
-1. Drop the parent JPG folder, KML, or KMZ onto the empty-state target, or use
-   `Browse Folder...` / `Browse KML/KMZ...`. After selection, the large input
-   target collapses into the compact top strip; dropping another input and
-   `Change Input` remain available.
-2. Open `Settings` and use `Input & Geometry` to set the buffer and JPG outline
-   mode. Use `0` for no added buffer on JPG folder and polygon KML/KMZ inputs.
-   LineString KML/KMZ inputs require a buffer greater than `0`. For KML/KMZ
-   inputs, turn on `Simplify KML/KMZ output vertices` only when dense vector
-   geometry should be reduced during export.
-3. Use `Sections` to set the shape count and, for multiple shapes, overlap,
-   shape label, split direction, and optional custom degrees.
-4. Use `Output` to set the file name or `.kmz` path.
-5. Click `Update Preview`. Buffer, shape count, and applicable overlap values
-   can also be adjusted from the bottom action bar for quick iterations.
-6. Click `Export KMZ`. `Update Preview` and `Export KMZ` remain in the fixed
-   action area as the window changes size.
-7. Use `Details` for the full scan/export summary, and `View Output Folder`
-   from the output settings or completion popup to open the KMZ folder.
+1. Drop a JPG folder, KML, or KMZ onto the welcome card, or choose it from
+   `Input`. The source strip shows the selected folder/file name; hover to see
+   the full path. `Input > Edit input path` also accepts a typed path.
+2. Open `Boundary` to choose the JPG outline mode and buffer in feet.
+   `Sections` contains shape count, overlap, naming, and split direction.
+   `Output` contains the KMZ name, destination, and vector export options remain
+   in `Boundary > Input & Geometry`.
+3. Click `Update Preview` to inspect the result. The bottom bar also provides
+   quick buffer, shape-count, and overlap edits when there is room.
+4. Click `Export KMZ`. Completion appears inline, with `Open saved folder`
+   pointing to the actual exported file's folder.
+5. Use `View` for the map legend, Focus Preview, the separate Inspector, and
+   World Imagery. `Details` retains the full processing/export summary.
 
 ## GUI layout and workflow
 
-- The dark, blue-accented interface is a single-page shell with no navigation
-  sidebar, tabs, or page-level scrolling. The preview is the only expanding
-  area.
-- Startup sizing uses the taskbar-safe work area of the monitor under the
-  pointer at launch, with current-window, primary-monitor, and Tk fallbacks.
-  The app centers itself and applies a measured or conservative fit so the
-  decorated window remains usable on shorter or offset monitors.
-- The compact top strip contains the selected input plus `Change Input`, `Key`,
-  `Settings`, `Focus Preview`, and `Open Inspector`.
-- `Settings` opens a temporary overlay over the right side of the preview.
-  Its `Input & Geometry`, `Sections`, and `Output` accordion groups expand one
-  at a time and can be collapsed; the drawer can scroll internally on a short
-  display without making the primary shell scroll.
-- `Key` opens a separate preview-key overlay. The Settings and Key overlays are
-  mutually exclusive and do not permanently reduce the preview.
-- The responsive bottom action bar keeps status, quick buffer/section controls,
-  `Details`, `Update Preview`, and `Export KMZ` accessible. It changes from one
-  row to two rows when horizontal space is limited.
-- Editing a preview-affecting option keeps the last drawing visible and marks
-  it `Preview out of date`; click `Update Preview` to regenerate it. Selecting
-  a different input clears the prior drawing instead.
-- `Focus Preview` expands the main preview to a taskbar-safe maximized or
-  near-fullscreen fit while reusing its canvas, toolbar, overlays, and state.
-  `Open Inspector` retains the large detachable preview window with independent
-  section controls, key, pan/zoom, and `Apply Preview`.
-- A `World Imagery` checkbox and compact imagery status appear beside the
-  Matplotlib tools on both the main preview and Inspector. The checkbox is one
-  shared, session-only preference, so changing it on either surface updates
-  both without regenerating the boundary.
-- Drag-and-drop and both browse workflows remain available. If optional
-  drag-and-drop initialization is unavailable, the browse buttons continue to
-  work.
-- The redesign changes GUI presentation and in-memory workflow state only. It
-  does not add, remove, or alter the boundary-processing and KMZ-export
-  contracts described below.
+- On Windows, JPG-folder, KML/KMZ, and Save As dialogs start at **This PC**.
+  Other platforms start at the home folder. The suggested output filename is retained.
+- The AALLC-inspired navy header, charcoal surfaces, blue primary controls,
+  larger text, rounded buttons and fields, and high-contrast checkboxes share centralized
+  theme tokens. The app remains a native Tk desktop application.
+- The preview is the only expanding workspace. Named settings panels replace
+  a crowded toolbar; each opens one focused page with labels above the fields.
+  The custom angle appears when Custom split direction is selected. Panels scroll
+  within the available height and retain the current map view.
+- The header reflows based on measured button widths. Short windows use a
+  compact brand header and welcome card. On narrow windows, secondary imagery
+  status and duplicate quick-edit controls give way to the primary actions;
+  their settings remain available through the menus.
+- Startup sizing still uses the monitor's taskbar-safe work area. Resizing is
+  coalesced into an idle layout pass; fonts and checkbox indicators respect
+  Tk's display scaling. Focus Preview and Inspector retain their existing
+  monitor-fitting behavior.
+- Processing and export continue on the existing background workers. An inline
+  activity card shows elapsed time, action labels indicate the operation, and
+  duplicate submissions are blocked while work is running. Completion does
+  not open a modal dialog. Processing errors and overwrite confirmation retain
+  their existing dialogs.
+- Editing preview settings marks the existing result `Preview out of date`;
+  selecting a different input clears it. No new automatic generation is added.
+- Hover/focus help explains common controls and shortcuts. The input command
+  menu supports keyboard navigation. `Escape` closes the active overlay first.
+- World Imagery remains a shared session preference across the main preview,
+  View menu, and Inspector, without changing generated geometry.
+- The UI refresh does not change geometry algorithms, input parsing, sectioning,
+  or the KMZ format. See [UI design references and validation](docs/gui-workspace-refresh.md).
 
 Keyboard shortcuts:
 
 - `F5` or `Ctrl+Enter`: update the preview.
 - `Ctrl+E`: export the KMZ.
-- `Ctrl+,`: open or close Settings.
+- `Ctrl+,`: open or close settings.
 - `Ctrl+L`: open Input & Geometry and focus the input path.
 - `Escape`: close the active overlay first, then exit Focus Preview.
 
@@ -153,6 +143,14 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
   hull when confidence or geometry guardrails are not met.
 - Manual JPG outline modes are `Concave hull`, `Route-aware`, and `Lawnmower
   outer envelope`.
+- For a confident boundary trace, `Auto` and `Route-aware` use camera positions
+  in capture order as the exterior when the last photo is within 2.5 typical
+  photo intervals of the first. This preserves concave turns in closed flights
+  without adding a spacing-based buffer. The requested buffer still applies.
+  Crossing/degenerate loops and routes with large capture gaps are rejected;
+  uncertain candidates retain the concave-hull fallback. Open traces retain
+  their spacing-based corridor buffer. These outlines follow GPS camera
+  positions, not the ground footprints or visible contents of the photos.
 - KML/KMZ files containing `LineString` geometry use that linework as the
   source geometry and buffer it directly in a projected CRS.
 - If a KML/KMZ contains both `LineString` and `Polygon` geometry, the

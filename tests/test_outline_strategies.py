@@ -7,7 +7,7 @@ from unittest import TestCase
 import numpy as np
 from shapely.geometry import MultiPoint, Point, Polygon
 
-from tests.geometry_test_utils import lawnmower_xy, points_from_xy
+from tests.geometry_test_utils import lawnmower_xy, points_from_xy, sample_closed_ring_xy
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 from camera_preflight import analyze_camera_preflight  # noqa: E402
 from outline_strategies import (  # noqa: E402
     OUTLINE_MODE_AUTO,
+    OUTLINE_MODE_CONCAVE,
     OUTLINE_MODE_LAWNMOWER,
     OUTLINE_MODE_ROUTE_AWARE,
     STRATEGY_CONCAVE,
@@ -29,6 +30,90 @@ from outline_strategies import (  # noqa: E402
 
 
 class OutlineStrategyTests(TestCase):
+    def test_closed_l_route_follows_camera_perimeter(self) -> None:
+        vertices = [(0, 0), (1200, 0), (1200, 80), (80, 80), (80, 240), (0, 240)]
+        coordinates = sample_closed_ring_xy(vertices)
+        expected = Polygon(vertices)
+        # Cover both flight directions, explicit closure, duplicate captures,
+        # and a start point in the middle of an edge.
+        variants = [
+            coordinates,
+            coordinates[::-1],
+            coordinates + coordinates[:1],
+            coordinates[:20] + coordinates[19:],
+            coordinates[15:] + coordinates[:15],
+        ]
+        for mode in (OUTLINE_MODE_AUTO, OUTLINE_MODE_ROUTE_AWARE):
+            for index, variant in enumerate(variants):
+                with self.subTest(mode=mode, variant=index):
+                    gps_points, projected = points_from_xy(variant)
+                    selection = select_outline(
+                        mode=mode, projected_points=projected,
+                        preflight=analyze_camera_preflight(gps_points, projected),
+                        concave_ratio=0.15, section_count=3,
+                    )
+                    polygon = selection.selected.polygon_projected
+                    self.assertEqual(selection.selected.strategy, STRATEGY_ROUTE_AWARE)
+                    self.assertEqual(selection.fallback_reason, "")
+                    self.assertTrue(polygon.is_valid)
+                    self.assertEqual(len(polygon.interiors), 0)
+                    self.assertTrue(polygon.covers(MultiPoint(projected)))
+                    self.assertTrue(polygon.covers(Point(500, 40)))
+                    self.assertFalse(polygon.covers(Point(120, 120)))
+                    self.assertLess(polygon.symmetric_difference(expected).area, 1e-6)
+                    self.assertLess(polygon.boundary.hausdorff_distance(expected.boundary), 1e-6)
+
+    def test_closed_route_rejects_crossing_camera_order(self) -> None:
+        coordinates = sample_closed_ring_xy([(0, 0), (100, 100), (0, 100), (100, 0)])
+        gps_points, projected = points_from_xy(coordinates)
+        selection = select_outline(
+            mode=OUTLINE_MODE_AUTO, projected_points=projected,
+            preflight=analyze_camera_preflight(gps_points, projected),
+            concave_ratio=0.15, section_count=1,
+        )
+        self.assertEqual(selection.selected.strategy, STRATEGY_CONCAVE)
+        self.assertIn("closed route is not a simple polygon", selection.fallback_reason)
+
+    def test_closed_route_rejects_large_internal_capture_gap(self) -> None:
+        coordinates = sample_closed_ring_xy([(0, 0), (60, 0), (60, 60), (0, 60)])
+        gps_points, projected = points_from_xy(coordinates[:3] + coordinates[12:])
+        preflight = analyze_camera_preflight(gps_points, projected)
+        self.assertTrue(preflight.section_breaks)
+        selection = select_outline(
+            mode=OUTLINE_MODE_ROUTE_AWARE, projected_points=projected,
+            preflight=preflight, concave_ratio=0.15, section_count=1,
+        )
+        self.assertEqual(selection.selected.strategy, STRATEGY_CONCAVE)
+        self.assertIn("ordered route contains large gaps", selection.fallback_reason)
+
+    def test_route_only_fills_loop_with_short_closing_gap(self) -> None:
+        coordinates = sample_closed_ring_xy([(0, 0), (300, 0), (300, 300), (0, 300)])
+        for missing_photos, fills_loop in ((1, True), (2, False)):
+            with self.subTest(missing_photos=missing_photos):
+                gps_points, projected = points_from_xy(coordinates[:-missing_photos])
+                selection = select_outline(
+                    mode=OUTLINE_MODE_ROUTE_AWARE, projected_points=projected,
+                    preflight=analyze_camera_preflight(gps_points, projected),
+                    concave_ratio=0.15, section_count=1,
+                )
+                self.assertEqual(selection.selected.strategy, STRATEGY_ROUTE_AWARE)
+                self.assertEqual(
+                    selection.selected.polygon_projected.covers(Point(150, 150)), fills_loop
+                )
+
+    def test_explicit_concave_mode_keeps_existing_closed_route_behavior(self) -> None:
+        coordinates = sample_closed_ring_xy(
+            [(0, 0), (1200, 0), (1200, 80), (80, 80), (80, 240), (0, 240)]
+        )
+        gps_points, projected = points_from_xy(coordinates)
+        selection = select_outline(
+            mode=OUTLINE_MODE_CONCAVE, projected_points=projected,
+            preflight=analyze_camera_preflight(gps_points, projected),
+            concave_ratio=0.15, section_count=1,
+        )
+        self.assertEqual(selection.selected.strategy, STRATEGY_CONCAVE)
+        self.assertTrue(selection.selected.polygon_projected.covers(Point(120, 120)))
+
     def test_lawnmower_uses_outermost_cameras(self) -> None:
         gps_points, projected = points_from_xy(lawnmower_xy(rows=5, columns=9))
         preflight = analyze_camera_preflight(gps_points, projected)

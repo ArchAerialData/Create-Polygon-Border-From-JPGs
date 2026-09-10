@@ -3,16 +3,18 @@ from __future__ import annotations
 import math
 import sys
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
 from pyproj import CRS, Transformer
+from shapely.affinity import rotate, translate
 from shapely.geometry import LineString, Polygon, box
 from shapely.ops import unary_union
 
-from tests.geometry_test_utils import synthetic_point
+from tests.geometry_test_utils import sample_closed_ring_xy, synthetic_point
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -35,6 +37,59 @@ from outline_strategies import OUTLINE_MODE_CONCAVE  # noqa: E402
 
 
 class CoreRegressionTests(TestCase):
+    def test_closed_jpg_loop_preserves_corner_through_preview_and_export(self) -> None:
+        perimeter = translate(
+            rotate(Polygon([(0, 0), (1200, 0), (1200, 80), (80, 80), (80, 240), (0, 240)]),
+                   17.0, origin=(0, 0)),
+            xoff=410000, yoff=3870000,
+        )
+        coordinates = sample_closed_ring_xy(list(perimeter.exterior.coords)[:-1])
+        to_wgs84 = Transformer.from_crs(32617, 4326, always_xy=True)
+        start = datetime(2026, 9, 1, 12, 0, 0)
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            gps_points = [
+                synthetic_point(
+                    str(folder / f"img_{index:04d}.jpg"),
+                    *to_wgs84.transform(x, y),
+                    capture_time=start + timedelta(seconds=index),
+                )
+                for index, (x, y) in enumerate(coordinates)
+            ]
+            # Discovery order must not override EXIF capture order.
+            gps_points.reverse()
+            with patch("jpg_boundary_kmz_core.find_jpgs", return_value=[p.path for p in gps_points]), patch(
+                "jpg_boundary_kmz_core.read_gps_points", return_value=(gps_points, 0)
+            ):
+                for buffer_ft, section_count in ((0.0, 1), (30.0, 1), (0.0, 3)):
+                    for profile in (GENERATION_PROFILE_PREVIEW, GENERATION_PROFILE_EXPORT):
+                        with self.subTest(buffer_ft=buffer_ft, sections=section_count, profile=profile):
+                            result = generate_boundary_from_input(
+                                folder, buffer_ft, section_count=section_count,
+                                generation_profile=profile,
+                            )
+                            expected = perimeter.buffer(buffer_ft * 0.3048, quad_segs=64)
+                            self.assertEqual(result.metadata.selected_strategy, "route_aware")
+                            self.assertEqual(result.metadata.fallback_reason, "")
+                            self.assertTrue(result.final_polygon_projected.is_valid)
+                            self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+                            self.assertLess(
+                                result.final_polygon_projected.boundary.hausdorff_distance(expected.boundary),
+                                0.001,
+                            )
+                            if section_count > 1:
+                                self.assertEqual(len(result.sections), section_count)
+                                self.assertTrue(all(s.polygon_projected.is_valid for s in result.sections))
+                            if profile == GENERATION_PROFILE_EXPORT and section_count == 1:
+                                output = save_kmz(result, folder / "loop.kmz")
+                                reloaded = generate_boundary_from_kmz(
+                                    output, buffer_ft=0.0, simplify_vector_output=False
+                                )
+                                self.assertLess(
+                                    reloaded.final_polygon_projected.boundary.hausdorff_distance(expected.boundary),
+                                    0.001,
+                                )
+
     def test_kmz_input_still_works(self) -> None:
         with TemporaryDirectory() as tmp:
             kmz_path = Path(tmp) / "source.kmz"

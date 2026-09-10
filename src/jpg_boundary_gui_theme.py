@@ -29,15 +29,17 @@ class GuiPalette:
     """Application color tokens shared by Tk, ttk, and Matplotlib."""
 
     BACKGROUND: str = "#1a1a1a"
+    BRAND: str = "#012458"
+    BRAND_LIGHT: str = "#a9c9f4"
     BACKGROUND_DEEP: str = "#0f0f0f"
-    SURFACE: str = "#2a2a2a"
-    SURFACE_RAISED: str = "#303030"
-    BORDER: str = "#404040"
+    SURFACE: str = "#242629"
+    SURFACE_RAISED: str = "#303338"
+    BORDER: str = "#42464d"
     PRIMARY: str = "#314dec"
     FOCUS_INFO: str = "#60a5fa"
     TEXT: str = "#ffffff"
     TEXT_SECONDARY: str = "#b3b3b3"
-    TEXT_MUTED: str = "#858585"
+    TEXT_MUTED: str = "#969ca6"
     SUCCESS: str = "#10b981"
     WARNING: str = "#f59e0b"
     ERROR: str = "#ef4444"
@@ -67,10 +69,10 @@ _BUTTON_STYLE_COLORS = {
         "foreground": PALETTE.BACKGROUND_DEEP,
     },
     "Ghost.TButton": {
-        "normal": PALETTE.BACKGROUND,
+        "normal": PALETTE.SURFACE,
         "active": PALETTE.SURFACE_RAISED,
         "pressed": PALETTE.SURFACE,
-        "disabled": PALETTE.BACKGROUND,
+        "disabled": PALETTE.SURFACE,
     },
 }
 _BUTTON_ELEMENT_NAMES = {
@@ -108,6 +110,8 @@ def apply_gui_theme(root: tk.Misc) -> ttk.Style:
     _configure_flat_button_styles(style)
     _configure_scrollbar_and_progress_styles(style)
     install_rounded_button_elements(style, root)
+    _install_rounded_field_elements(style, root)
+    _install_checkbox_elements(style, root)
     return style
 
 
@@ -321,11 +325,17 @@ def install_rounded_button_elements(style: ttk.Style, root: tk.Misc) -> bool:
                 ("pressed", state_images["pressed"]),
                 ("focus", state_images["focus"]),
                 ("active", state_images["active"]),
-                border=(8, 8, 8, 8),
+                border=_rounded_corner_size(root),
+                padding=2,
                 sticky="nsew",
             )
 
         for element_name, style_name, _state_images in element_specs:
+            # Transparent image corners reveal the widget's background. The
+            # colored fill belongs to the image, not the rectangular Tk surface.
+            style.configure(style_name, background=PALETTE.SURFACE)
+            style.map(style_name, background=[("disabled", PALETTE.SURFACE),
+                                               ("active", PALETTE.SURFACE)])
             style.layout(
                 style_name,
                 [
@@ -353,6 +363,46 @@ def install_rounded_button_elements(style: ttk.Style, root: tk.Misc) -> bool:
         return True
     except Exception:
         return False
+
+
+def _install_checkbox_elements(style: ttk.Style, root: tk.Misc) -> None:
+    """Larger, high-contrast indicators while retaining native checkbox semantics."""
+    if "App.Check.indicator" in style.element_names():
+        return
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+        size = max(16, round(14 * float(root.tk.call("tk", "scaling"))))
+        images = {}
+        for name, checked, disabled in (("off", False, False), ("on", True, False),
+                                         ("disabled_off", False, True), ("disabled_on", True, True)):
+            image = Image.new("RGBA", (size * 4, size * 4))
+            draw = ImageDraw.Draw(image)
+            fill = PALETTE.PRIMARY if checked and not disabled else PALETTE.SURFACE_RAISED
+            border = PALETTE.BORDER if disabled else PALETTE.FOCUS_INFO if checked else PALETTE.TEXT_MUTED
+            draw.rounded_rectangle((2, 2, size * 4 - 3, size * 4 - 3), radius=12,
+                                   fill=fill, outline=border, width=4)
+            if checked:
+                draw.line([(size * 1.0, size * 2.0), (size * 1.7, size * 2.7),
+                           (size * 3.0, size * 1.2)],
+                          fill=PALETTE.TEXT_MUTED if disabled else PALETTE.TEXT, width=6)
+            padded = Image.new("RGBA", (size + 8, size))
+            padded.paste(image.resize((size, size), Image.Resampling.LANCZOS), (0, 0))
+            images[name] = ImageTk.PhotoImage(padded, master=root)
+        name = "App.Check.indicator"
+        style.element_create(name, "image", images["off"],
+                             ("disabled", "selected", images["disabled_on"]),
+                             ("disabled", images["disabled_off"]), ("selected", images["on"]))
+        for style_name in ("App.TCheckbutton", "Surface.TCheckbutton"):
+            style.layout(style_name, [("Checkbutton.padding", {"sticky": "nswe", "children": [
+                (name, {"side": "left", "sticky": ""}),
+                ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                    ("Checkbutton.label", {"sticky": "nswe"}),
+                ]}),
+            ]})])
+        setattr(root, "_jpg_boundary_checkbox_images", images)
+    except (ImportError, tk.TclError):
+        # The native themed checkbox remains fully usable on other Tk builds.
+        pass
 
 
 def apply_windows_native_chrome(root: tk.Misc) -> bool:
@@ -476,9 +526,10 @@ def _configure_named_fonts(root: tk.Misc) -> None:
         if preferred_family is None:
             return
         for font_name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
-            tkfont.nametofont(font_name, root=root).configure(family=preferred_family)
+            tkfont.nametofont(font_name, root=root).configure(family=preferred_family, size=10)
         tkfont.nametofont("TkHeadingFont", root=root).configure(
             family=preferred_family,
+            size=12,
             weight="bold",
         )
     except (AttributeError, RuntimeError, tk.TclError):
@@ -514,6 +565,7 @@ def _configure_base_styles(style: ttk.Style) -> None:
 
 
 def _configure_frame_styles(style: ttk.Style) -> None:
+    style.configure("Brand.TFrame", background=PALETTE.BRAND)
     style.configure("TFrame", background=PALETTE.BACKGROUND)
     style.configure(
         "TLabelframe",
@@ -551,6 +603,14 @@ def _configure_frame_styles(style: ttk.Style) -> None:
 
 
 def _configure_label_styles(style: ttk.Style) -> None:
+    style.configure("Brand.TLabel", background=PALETTE.BRAND, foreground=PALETTE.TEXT,
+                    font=("Segoe UI", 18, "bold"))
+    style.configure("Brand.Caption.TLabel", background=PALETTE.BRAND,
+                    foreground=PALETTE.BRAND_LIGHT, font=("Segoe UI", 9, "bold"))
+    style.configure("Hero.TLabel", background=PALETTE.SURFACE,
+                    foreground=PALETTE.TEXT, font=("Segoe UI", 20, "bold"))
+    style.configure("Eyebrow.TLabel", background=PALETTE.SURFACE,
+                    foreground=PALETTE.FOCUS_INFO, font=("Segoe UI", 9, "bold"))
     style.configure(
         "TLabel",
         background=PALETTE.BACKGROUND,
@@ -624,6 +684,11 @@ def _configure_label_styles(style: ttk.Style) -> None:
         font="TkDefaultFont",
     )
     for style_name in (
+        "TLabel",
+        "Brand.TLabel",
+        "Brand.Caption.TLabel",
+        "Hero.TLabel",
+        "Eyebrow.TLabel",
         "App.TLabel",
         "Secondary.TLabel",
         "Surface.TLabel",
@@ -638,6 +703,7 @@ def _configure_label_styles(style: ttk.Style) -> None:
     ):
         style.map(
             style_name,
+            background=[("disabled", style.configure(style_name, "background"))],
             foreground=[
                 ("disabled", PALETTE.TEXT_MUTED),
             ],
@@ -782,7 +848,8 @@ def _configure_flat_button_styles(style: ttk.Style) -> None:
             focusthickness=2,
             borderwidth=1,
             relief="flat",
-            padding=(12, 7),
+            padding=(12, 5),
+            font=("Segoe UI", 10),
             anchor="center",
         )
         style.map(
@@ -849,6 +916,60 @@ def _configure_scrollbar_and_progress_styles(style: ttk.Style) -> None:
         )
 
 
+def _rounded_corner_size(root: tk.Misc) -> int:
+    return max(8, round(8 * float(root.tk.call("tk", "scaling")) / (96 / 72)))
+
+
+def _install_rounded_field_elements(style: ttk.Style, root: tk.Misc) -> None:
+    """Skin native editors without replacing their editing or keyboard bindings."""
+    element = "App.RoundedField"
+    if element in style.element_names():
+        return
+    images = {
+        "normal": _create_rounded_image(root, PALETTE.SURFACE_RAISED, PALETTE.BORDER),
+        "focus": _create_rounded_image(root, PALETTE.SURFACE_RAISED, PALETTE.FOCUS_INFO, border_width=2),
+        "invalid": _create_rounded_image(root, PALETTE.SURFACE_RAISED, PALETTE.ERROR, border_width=2),
+        "disabled": _create_rounded_image(root, PALETTE.SURFACE, PALETTE.BORDER),
+    }
+    style.element_create(element, "image", images["normal"],
+                         ("disabled", images["disabled"]), ("invalid", images["invalid"]),
+                         ("focus", images["focus"]), border=_rounded_corner_size(root), padding=3,
+                         sticky="nsew")
+    # Image arrows avoid the square, separately painted clam arrow buttons.
+    # The uparrow/downarrow suffixes retain ttk's native hit targets and bindings.
+    arrow_size = max(16, round(16 * float(root.tk.call("tk", "scaling")) / (96 / 72)))
+    for direction in ("up", "down"):
+        for state, color in (("normal", PALETTE.TEXT_SECONDARY), ("disabled", PALETTE.TEXT_MUTED)):
+            arrow = tk.PhotoImage(master=root, width=arrow_size, height=arrow_size // 2 + 3)
+            triangle_height = max(4, round(arrow_size / 4))
+            for row in range(triangle_height):
+                half_width = row if direction == "up" else triangle_height - 1 - row
+                x = arrow_size // 2
+                y = 3 + row
+                arrow.put(color, to=(x - half_width, y, x + half_width + 1, y + 1))
+            images[f"{direction}_{state}"] = arrow
+        style.element_create(f"App.Field.{direction}arrow", "image", images[f"{direction}_normal"],
+                             ("disabled", images[f"{direction}_disabled"]))
+    for kind in ("Entry", "Combobox", "Spinbox"):
+        children = []
+        if kind == "Combobox":
+            children.append(("App.Field.downarrow", {"side": "right", "sticky": ""}))
+        elif kind == "Spinbox":
+            children.append(("null", {"side": "right", "children": [
+                ("App.Field.uparrow", {"side": "top", "sticky": "e"}),
+                ("App.Field.downarrow", {"side": "bottom", "sticky": "e"}),
+            ]}))
+        children.append((f"{kind}.padding", {"sticky": "nsew", "children": [
+            (f"{kind}.textarea", {"sticky": "nsew"}),
+        ]}))
+        name = f"App.T{kind}"
+        style.layout(name, [(element, {"sticky": "nsew", "children": children})])
+        style.configure(name, background=PALETTE.SURFACE)
+        style.map(name, background=[("disabled", PALETTE.SURFACE), ("readonly", PALETTE.SURFACE),
+                                    ("active", PALETTE.SURFACE)])
+    root._jpg_boundary_field_images = images
+
+
 def _create_rounded_image(
     root: tk.Misc,
     fill: str,
@@ -856,6 +977,22 @@ def _create_rounded_image(
     *,
     border_width: int = 1,
 ) -> tk.PhotoImage:
+    # Supersampling removes jagged corners while preserving the native ttk
+    # focus, pressed, disabled and keyboard states. Pillow ships with Matplotlib.
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+        scale = 4
+        corner = _rounded_corner_size(root)
+        size = corner * 2 + 4
+        image = Image.new("RGBA", (size * scale, size * scale))
+        drawing = ImageDraw.Draw(image)
+        drawing.rounded_rectangle(
+            (1, 1, size * scale - 2, size * scale - 2), radius=corner * scale,
+            fill=fill, outline=outline, width=border_width * scale,
+        )
+        return ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS), master=root)
+    except ImportError:
+        pass
     width = 20
     height = 20
     image = tk.PhotoImage(master=root, width=width, height=height)

@@ -36,6 +36,8 @@ STRATEGY_MIXED = "mixed_sections"
 
 MIN_AREA_RATIO = 0.05
 MAX_AREA_RATIO = 5.0
+# Allow a short uncaptured closing leg, measured in typical photo intervals.
+MAX_ROUTE_CLOSURE_RATIO = 2.5
 
 
 @dataclass
@@ -149,6 +151,7 @@ def build_route_aware_candidate(
         "preflight_pattern": preflight.pattern,
         "preflight_confidence": float(preflight.confidence),
         "median_ordered_spacing_m": preflight.metrics.median_ordered_spacing_m,
+        "closure_ratio": preflight.metrics.closure_ratio,
     }
     rejections: list[str] = []
     if preflight.pattern != PATTERN_BOUNDARY_TRACE:
@@ -162,10 +165,23 @@ def build_route_aware_candidate(
         rejections.append("ordered route has excessive heading alternation")
     if len(ordered_points) < 3:
         rejections.append("fewer than 3 ordered points")
+    if preflight.section_breaks:
+        rejections.append("ordered route contains large gaps")
 
     if rejections:
         polygon: object = Polygon()
+    elif preflight.metrics.closure_ratio <= MAX_ROUTE_CLOSURE_RATIO:
+        # A perimeter flight already supplies the exterior in capture order.
+        # Buffering its linework creates a hole and forces a hull fallback,
+        # which can bridge concave turns. Do not repair an invalid ring: that
+        # would hide an unreliable capture order by inventing a new boundary.
+        diagnostics["route_kind"] = "closed_loop"
+        polygon = Polygon(ordered_points)
+        if not polygon.is_valid or polygon.area <= 0:
+            rejections.append("closed route is not a simple polygon")
+            polygon = Polygon()
     else:
+        diagnostics["route_kind"] = "open_trace"
         width_m = max(
             preflight.metrics.median_nearest_spacing_m,
             preflight.metrics.median_ordered_spacing_m * 0.75,

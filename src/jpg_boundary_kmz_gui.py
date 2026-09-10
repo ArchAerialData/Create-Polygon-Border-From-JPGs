@@ -7,6 +7,7 @@ import sys
 import threading
 import tkinter as tk
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -27,6 +28,7 @@ from jpg_boundary_gui_basemap import (
     ProjectedView,
 )
 from jpg_boundary_gui_scale_bar import ScaleBarController
+from jpg_boundary_gui_controls import DropdownButton, ToolTip
 from jpg_boundary_gui_theme import (
     PALETTE,
     apply_gui_theme,
@@ -87,9 +89,9 @@ PREVIEW_MAX_PLOT_POINTS = 2500
 PREVIEW_LIMIT_PADDING_RATIO = 0.04
 PREVIEW_KEY_PANEL_WIDTH = 340
 PREVIEW_KEY_WRAP_LENGTH = 270
-ACTION_BAR_MIN_BREAKPOINT = 1120
+ACTION_BAR_MIN_BREAKPOINT = 680
 HEADER_MIN_BREAKPOINT = 760
-SETTINGS_DRAWER_WIDTH = 430
+SETTINGS_DRAWER_WIDTH = 480
 SPLIT_DIRECTION_OPTIONS = (
     "Auto",
     "0 deg / East-West",
@@ -174,11 +176,16 @@ class BoundaryKmzApp:
         self._busy = False
         self._settings_drawer_open = False
         self._legend_open = False
+        self._view_menu_open = False
+        self._layout_after_id: str | None = None
+        self._busy_after_id: str | None = None
+        self._busy_started_at = 0.0
+        self._busy_message = ""
+        self._last_export_path: Path | None = None
         self._focus_mode = False
         self._has_selected_input = False
         self._active_settings_group: str | None = "input"
         self._settings_group_frames: dict[str, ttk.Frame] = {}
-        self._settings_group_buttons: dict[str, ttk.Button] = {}
         self._drop_targets: list[tk.Widget] = []
         self._drop_feedback_surfaces: dict[str, tk.Widget] = {}
         self._all_mutation_widgets: list[tk.Widget] = []
@@ -269,12 +276,14 @@ class BoundaryKmzApp:
         self._refresh_input_shell_state()
         self._refresh_preview_state_badge()
         self._register_keyboard_shortcuts()
+        self._install_control_help()
         self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.bind("<Button-1>", self._dismiss_view_menu, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown_basemap)
         self.root.after(100, self._drain_queue)
 
     def _build_ui(self) -> None:
-        self.root_frame = ttk.Frame(self.root, style="App.TFrame", padding=12)
+        self.root_frame = ttk.Frame(self.root, style="App.TFrame", padding=16)
         self.root_frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -288,78 +297,74 @@ class BoundaryKmzApp:
 
     def _build_top_input_strip(self, parent: ttk.Frame) -> None:
         self.header_frame = ttk.Frame(
-            parent,
-            style="Card.TFrame",
-            padding=(12, 8),
+            parent, style="Card.TFrame",
         )
-        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        self.header_frame.columnconfigure(1, weight=1)
-
+        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self.header_frame.columnconfigure(0, weight=1)
+        self.brand_frame = ttk.Frame(self.header_frame, style="Brand.TFrame", padding=(18, 12))
+        self.brand_frame.grid(row=0, column=0, sticky="ew")
+        self.brand_frame.columnconfigure(0, weight=1)
+        self.brand_caption = ttk.Label(self.brand_frame, text="ARCH AERIAL  /  MAPPING TOOLS",
+                                       style="Brand.Caption.TLabel")
+        self.brand_caption.grid(row=0, column=0, sticky="w")
         self.app_title_label = ttk.Label(
-            self.header_frame,
-            text="JPG Boundary to KMZ",
-            style="Title.TLabel",
+            self.brand_frame, text="Boundary workspace", style="Brand.TLabel",
         )
-        self.app_title_label.grid(row=0, column=0, sticky="w", padx=(0, 14))
-
+        self.app_title_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+        self.workflow_label = ttk.Label(
+            self.brand_frame, text="01  INPUT     /     02  PREVIEW     /     03  EXPORT",
+            style="Brand.Caption.TLabel",
+        )
+        self.workflow_label.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
+        self.source_strip = ttk.Frame(self.header_frame, style="Card.TFrame", padding=(12, 10))
+        self.source_strip.grid(row=1, column=0, sticky="ew")
+        self.source_strip.columnconfigure(0, weight=1)
         self.compact_input_target = tk.Label(
-            self.header_frame,
+            self.source_strip,
             textvariable=self.input_summary_var,
-            anchor="w",
-            padx=10,
-            pady=6,
-            cursor="hand2",
-            background="#202838",
-            foreground="#d8e7ff",
-            highlightthickness=1,
-            highlightbackground="#3b4a63",
+            anchor="w", width=1, padx=10, pady=8, cursor="hand2",
+            font=("Segoe UI", 10), background=PALETTE.BACKGROUND,
+            foreground=PALETTE.TEXT, highlightthickness=1,
         )
-        self.compact_input_target.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.compact_input_target.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         style_tk_label(
-            self.compact_input_target,
-            surface="#202838",
-            foreground="#d8e7ff",
+            self.compact_input_target, surface=PALETTE.BACKGROUND,
         )
         self.compact_input_target.bind(
             "<Button-1>",
             lambda _event: self._open_input_settings(),
         )
 
-        self.change_input_button = ttk.Button(
-            self.header_frame,
-            text="Change Input",
-            style="Ghost.TButton",
-            command=self._open_input_settings,
+        self.header_actions = ttk.Frame(self.source_strip, style="Card.TFrame")
+        self.header_actions.grid(row=0, column=1, sticky="e")
+        self.change_input_button = DropdownButton(
+            self.header_actions, text="Input ▾", style="Secondary.TButton",
         )
-        self.change_input_button.grid(row=0, column=2, padx=(0, 6))
-        self.key_button = ttk.Button(
-            self.header_frame,
-            text="Key",
-            style="Ghost.TButton",
-            command=self._toggle_preview_key,
-        )
-        self.key_button.grid(row=0, column=3, padx=(0, 6))
+        self.change_input_button.menu.add_command(label="Choose JPG folder…", command=self._browse_parent)
+        self.change_input_button.menu.add_command(label="Choose KML or KMZ…", command=self._browse_kmz)
+        self.change_input_button.menu.add_separator()
+        self.change_input_button.menu.add_command(label="Edit input path…", command=self._open_input_settings,
+                                                  accelerator="Ctrl+L")
+        self.change_input_button.grid(row=0, column=0, padx=(0, 6))
         self.settings_button = ttk.Button(
-            self.header_frame,
-            text="Settings",
-            style="Secondary.TButton",
-            command=self._toggle_settings_drawer,
+            self.header_actions, text="Boundary ▾", style="Ghost.TButton",
+            command=lambda: self._toggle_settings_panel("input"),
         )
-        self.settings_button.grid(row=0, column=4, padx=(0, 6))
-        self.focus_button = ttk.Button(
-            self.header_frame,
-            text="Focus Preview",
-            style="Ghost.TButton",
-            command=self._toggle_focus_mode,
+        self.settings_button.grid(row=0, column=1, padx=(0, 6))
+        self.sections_settings_button = ttk.Button(
+            self.header_actions, text="Sections ▾", style="Ghost.TButton",
+            command=lambda: self._toggle_settings_panel("sections"),
         )
-        self.focus_button.grid(row=0, column=5, padx=(0, 6))
-        self.expand_preview_button = ttk.Button(
-            self.header_frame,
-            text="Open Inspector",
-            style="Ghost.TButton",
-            command=self._open_fullscreen_preview,
+        self.sections_settings_button.grid(row=0, column=2, padx=(0, 6))
+        self.output_settings_button = ttk.Button(
+            self.header_actions, text="Output ▾", style="Ghost.TButton",
+            command=lambda: self._toggle_settings_panel("output"),
         )
-        self.expand_preview_button.grid(row=0, column=6)
+        self.output_settings_button.grid(row=0, column=3, padx=(0, 6))
+        self.view_button = ttk.Button(
+            self.header_actions, text="View ▾", style="Ghost.TButton", command=self._toggle_view_menu,
+        )
+        self.view_button.grid(row=0, column=4)
         self._register_drop_target(
             self.compact_input_target,
             feedback_surface=self.compact_input_target,
@@ -374,6 +379,7 @@ class BoundaryKmzApp:
         self.preview_toolbar_frame = ttk.Frame(
             self.preview_frame,
             style="Toolbar.TFrame",
+            padding=(10, 2),
         )
         self.preview_toolbar_frame.grid(row=0, column=0, sticky="ew")
         self.preview_toolbar_frame.columnconfigure(0, weight=1)
@@ -432,6 +438,8 @@ class BoundaryKmzApp:
         self._build_empty_input_overlay(self.preview_stack)
         self._build_settings_drawer(self.preview_stack)
         self._build_preview_key_overlay(self.preview_stack)
+        self._build_view_menu(self.preview_stack)
+        self._build_activity_overlay(self.preview_stack)
         self._register_preview_interactions()
 
     def _create_preview_map_surface(
@@ -1006,7 +1014,11 @@ class BoundaryKmzApp:
         reserved_width = (
             0
             if surface.surface_id.startswith("inspector:")
-            else max(PREVIEW_KEY_PANEL_WIDTH, SETTINGS_DRAWER_WIDTH) + 24
+            else max(
+                PREVIEW_KEY_PANEL_WIDTH + 28,
+                min(max(SETTINGS_DRAWER_WIDTH, self.settings_content.winfo_reqwidth() + 40),
+                    max(self.preview_stack.winfo_width() - 24, 300)),
+            ) + 24
         )
         max_width = max(
             90.0,
@@ -1062,6 +1074,11 @@ class BoundaryKmzApp:
         if self._closing:
             return
         self._closing = True
+        for after_id in (self._layout_after_id, self._busy_after_id):
+            if after_id is not None:
+                self.root.after_cancel(after_id)
+        for tooltip in getattr(self, "_tooltips", []):
+            tooltip.hide()
         if self._main_map_surface is not None:
             self._reset_preview_map_surface(self._main_map_surface)
         if self._fullscreen_window_exists():
@@ -1085,21 +1102,22 @@ class BoundaryKmzApp:
         self.empty_input_overlay = ttk.Frame(
             parent,
             style="Overlay.TFrame",
-            padding=(22, 18),
+            padding=(28, 24),
         )
-        ttk.Label(
+        self.empty_input_overlay.columnconfigure((0, 1), weight=1)
+        self.empty_caption_label = ttk.Label(
+            self.empty_input_overlay, text="YOUR NEXT BOUNDARY STARTS HERE", style="Eyebrow.TLabel",
+        )
+        self.empty_caption_label.grid(row=0, column=0, columnspan=2, pady=(0, 5))
+        self.empty_title_label = ttk.Label(
             self.empty_input_overlay,
-            text="Choose an input to build a boundary",
-            style="Title.TLabel",
-        ).grid(row=0, column=0, columnspan=2, pady=(0, 5))
-        ttk.Label(
-            self.empty_input_overlay,
-            text="Drop a JPG folder, KML, or KMZ file below",
-            style="Secondary.TLabel",
-        ).grid(row=1, column=0, columnspan=2, pady=(0, 12))
+            text="From flight to finished outline",
+            style="Hero.TLabel",
+        )
+        self.empty_title_label.grid(row=1, column=0, columnspan=2, pady=(0, 12))
 
         drop_text = (
-            "Drop folder, KML, or KMZ here"
+            "Drop a JPG folder or KML / KMZ here\nGeotagged photos, polygons, and flight paths"
             if DND_FILES is not None
             else "Drag-and-drop unavailable — browse below"
         )
@@ -1107,36 +1125,145 @@ class BoundaryKmzApp:
             self.empty_input_overlay,
             text=drop_text,
             anchor="center",
-            padx=36,
-            pady=24,
+            padx=18,
+            pady=22,
+            font=("Segoe UI", 11),
             cursor="hand2",
-            background="#202838",
-            foreground="#d8e7ff",
+            background=PALETTE.SURFACE_RAISED,
+            foreground=PALETTE.TEXT_SECONDARY,
             highlightthickness=2,
             highlightbackground="#3b82f6",
         )
         self.drop_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        self.drop_label.bind("<Button-1>", lambda _event: self._browse_parent())
         style_tk_label(
             self.drop_label,
-            surface="#202838",
-            foreground="#d8e7ff",
+            surface=PALETTE.SURFACE_RAISED,
+            foreground=PALETTE.TEXT_SECONDARY,
         )
         self.browse_folder_button = ttk.Button(
             self.empty_input_overlay,
-            text="Browse Folder…",
-            style="Secondary.TButton",
+            text="Choose JPG folder…",
+            style="Primary.TButton",
             command=self._browse_parent,
         )
         self.browse_folder_button.grid(row=3, column=0, sticky="ew", padx=(0, 5))
         self.browse_vector_button = ttk.Button(
             self.empty_input_overlay,
-            text="Browse KML/KMZ…",
+            text="Choose KML / KMZ…",
             style="Secondary.TButton",
             command=self._browse_kmz,
         )
         self.browse_vector_button.grid(row=3, column=1, sticky="ew", padx=(5, 0))
+        self.empty_hint_label = ttk.Label(
+            self.empty_input_overlay,
+            text="Choose input  →  Adjust boundary  →  Preview & export",
+            style="Secondary.TLabel", justify="center", anchor="center",
+        )
+        self.empty_hint_label.grid(row=4, column=0, columnspan=2, pady=(16, 0), sticky="ew")
         self.empty_input_overlay.place(relx=0.5, rely=0.5, anchor="center")
         self._register_drop_target(self.drop_label, feedback_surface=self.drop_label)
+
+    def _build_view_menu(self, parent: ttk.Frame) -> None:
+        self.view_menu = ttk.Frame(parent, style="Overlay.TFrame", padding=14)
+        self.view_menu.columnconfigure(0, weight=1)
+        ttk.Label(self.view_menu, text="PREVIEW TOOLS", style="Eyebrow.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        self.key_button = ttk.Button(self.view_menu, text="Map legend", style="Ghost.TButton",
+                                     command=self._toggle_preview_key)
+        self.key_button.grid(row=1, column=0, sticky="ew", pady=3)
+        self.focus_button = ttk.Button(self.view_menu, text="Focus Preview", style="Ghost.TButton",
+                                       command=self._toggle_focus_mode)
+        self.focus_button.grid(row=2, column=0, sticky="ew", pady=3)
+        self.expand_preview_button = ttk.Button(
+            self.view_menu, text="Open Inspector", style="Ghost.TButton",
+            command=self._open_fullscreen_preview,
+        )
+        self.expand_preview_button.grid(row=3, column=0, sticky="ew", pady=3)
+        ttk.Separator(self.view_menu).grid(row=4, column=0, sticky="ew", pady=8)
+        ttk.Checkbutton(self.view_menu, text="World Imagery", variable=self.world_imagery_var,
+                        style="Surface.TCheckbutton").grid(row=5, column=0, sticky="w")
+        self.view_menu.place_forget()
+
+    def _toggle_view_menu(self) -> None:
+        if self._view_menu_open:
+            self._close_view_menu()
+            return
+        self._close_settings_drawer()
+        self._close_preview_key()
+        self._view_menu_open = True
+        self.view_menu.place(relx=1.0, x=-8, y=8, anchor="ne")
+        self.view_menu.lift()
+        self.key_button.focus_set()
+
+    def _close_view_menu(self) -> None:
+        self._view_menu_open = False
+        if hasattr(self, "view_menu"):
+            self.view_menu.place_forget()
+
+    def _dismiss_view_menu(self, event: object) -> None:
+        if not self._view_menu_open:
+            return
+        widget = getattr(event, "widget", None)
+        if widget is self.view_button:
+            return
+        while widget is not None:
+            if widget is self.view_menu:
+                return
+            widget = getattr(widget, "master", None)
+        self._close_view_menu()
+
+    def _toggle_settings_panel(self, group: str) -> None:
+        if self._settings_drawer_open and self._active_settings_group == group:
+            self._close_settings_drawer()
+            return
+        self._close_view_menu()
+        self._close_preview_key()
+        if self._active_settings_group != group:
+            self._toggle_settings_group(group)
+        self._settings_drawer_open = True
+        self._place_settings_drawer()
+        self.settings_drawer.lift()
+        self.settings_canvas.yview_moveto(0)
+
+    def _build_activity_overlay(self, parent: ttk.Frame) -> None:
+        self.activity_overlay = ttk.Frame(parent, style="Overlay.TFrame", padding=(18, 14))
+        self.activity_label = ttk.Label(self.activity_overlay, style="Title.TLabel")
+        self.activity_label.grid(row=0, column=0, sticky="w")
+        self.activity_detail = ttk.Label(self.activity_overlay, style="Secondary.TLabel")
+        self.activity_detail.grid(row=1, column=0, sticky="w", pady=(5, 0))
+
+    def _refresh_activity(self) -> None:
+        self._busy_after_id = None
+        if not self._busy or self._closing:
+            return
+        seconds = int(time.monotonic() - self._busy_started_at)
+        self.activity_label.configure(text=self._busy_message)
+        self.activity_detail.configure(text=f"Running in the background · {seconds}s elapsed")
+        self.activity_overlay.place(relx=0.5, y=16, anchor="n")
+        self.activity_overlay.lift()
+        if self._settings_drawer_open:
+            self.settings_drawer.lift()
+        elif self._legend_open:
+            self.preview_key_overlay.lift()
+        elif self._view_menu_open:
+            self.view_menu.lift()
+        self._busy_after_id = self.root.after(1000, self._refresh_activity)
+
+    def _install_control_help(self) -> None:
+        self._tooltips = [
+            ToolTip(self.compact_input_target, lambda: self.parent_var.get() or "Choose a folder or vector file from Input."),
+            ToolTip(self.settings_button, "Buffer distance and JPG outline strategy."),
+            ToolTip(self.sections_settings_button, "Shape count, overlap, labels, and split direction."),
+            ToolTip(self.output_settings_button, "Name your KMZ and choose where to save it."),
+            ToolTip(self.scan_button, "Build or refresh the preview · F5 or Ctrl+Enter"),
+            ToolTip(self.export_button, "Generate and save the KMZ using the current settings · Ctrl+E"),
+            ToolTip(self.quick_buffer_entry, "Added boundary buffer in feet. Use 0 for no added JPG or polygon buffer."),
+            ToolTip(self.quick_section_count_spinbox, "Split the boundary into this many connected shapes."),
+            ToolTip(self.outline_mode_combo, "Auto selects a suitable outline from the ordered camera positions."),
+            ToolTip(self.export_destination_label, lambda: self.output_var.get()),
+        ]
 
     def _build_settings_drawer(self, parent: ttk.Frame) -> None:
         self.settings_drawer = ttk.Frame(
@@ -1150,11 +1277,10 @@ class BoundaryKmzApp:
         drawer_header = ttk.Frame(self.settings_drawer, style="Overlay.TFrame")
         drawer_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         drawer_header.columnconfigure(0, weight=1)
-        ttk.Label(
-            drawer_header,
-            text="Settings",
-            style="Title.TLabel",
-        ).grid(row=0, column=0, sticky="w")
+        self.settings_title = ttk.Label(
+            drawer_header, text="Boundary settings", style="Title.TLabel",
+        )
+        self.settings_title.grid(row=0, column=0, sticky="w")
         ttk.Button(
             drawer_header,
             text="Close",
@@ -1164,7 +1290,7 @@ class BoundaryKmzApp:
 
         self.settings_canvas = tk.Canvas(
             self.settings_drawer,
-            background="#252b38",
+            background=PALETTE.SURFACE,
             highlightthickness=0,
             borderwidth=0,
         )
@@ -1196,21 +1322,19 @@ class BoundaryKmzApp:
         self._create_settings_group(
             self.settings_content,
             "input",
-            "Input & Geometry",
             self._build_geometry_settings,
         )
         self._create_settings_group(
             self.settings_content,
             "sections",
-            "Sections",
             self._build_section_settings,
         )
         self._create_settings_group(
             self.settings_content,
             "output",
-            "Output",
             self._build_output_settings,
         )
+        self._refresh_drawer_summaries()
         self._bind_local_mousewheel_tree(
             self.settings_drawer,
             self._scroll_settings_drawer,
@@ -1221,240 +1345,104 @@ class BoundaryKmzApp:
         self,
         parent: ttk.Frame,
         key: str,
-        title: str,
         builder,
     ) -> None:
-        row = len(self._settings_group_frames) * 2
-        header = ttk.Frame(parent, style="Card.TFrame", padding=(5, 4))
-        header.grid(row=row, column=0, sticky="ew", pady=(0, 4))
-        header.columnconfigure(1, weight=1)
-        button = ttk.Button(
-            header,
-            text=("▾ " if key == self._active_settings_group else "▸ ") + title,
-            style="Ghost.TButton",
-            command=lambda group=key: self._toggle_settings_group(group),
-        )
-        button.grid(row=0, column=0, sticky="w")
-        summary = ttk.Label(header, style="Muted.TLabel")
-        summary.grid(row=0, column=1, sticky="e", padx=(8, 4))
-
-        content = ttk.Frame(parent, style="Card.TFrame", padding=(10, 8))
-        content.grid(row=row + 1, column=0, sticky="ew", pady=(0, 8))
-        content.columnconfigure(1, weight=1)
-        builder(content)
+        # Each top-level menu opens one page; do not repeat navigation inside it.
+        content = ttk.Frame(parent, style="Card.TFrame", padding=(6, 8, 6, 16))
+        content.grid(row=0, column=0, sticky="ew")
+        content.columnconfigure(0, weight=1)
+        descriptions = {
+            "input": "Choose a source and adjust its outer boundary.",
+            "sections": "Divide the boundary into overlapping shapes.",
+            "output": "Choose the name and location of your KMZ.",
+        }
+        description = ttk.Label(content, text=descriptions[key], style="Secondary.TLabel",
+                                wraplength=340, justify="left")
+        description.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        content.bind("<Configure>", lambda event, label=description:
+                     label.configure(wraplength=max(120, event.width - 20)))
+        summary = ttk.Label(content, style="Eyebrow.TLabel", width=1)
+        summary.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        fields = ttk.Frame(content, style="Card.TFrame")
+        fields.grid(row=2, column=0, sticky="ew")
+        fields.columnconfigure(0, weight=1)
+        builder(fields)
         if key != self._active_settings_group:
             content.grid_remove()
         self._settings_group_frames[key] = content
-        self._settings_group_buttons[key] = button
         setattr(self, f"_{key}_settings_summary", summary)
 
+    @staticmethod
+    def _settings_field(parent: ttk.Frame, row: int, text: str, control) -> ttk.Label:
+        """Keep labels above full-width native controls for readable narrow panels."""
+        label = ttk.Label(parent, text=text, style="Secondary.TLabel")
+        label.grid(row=row, column=0, sticky="w", pady=(0, 5))
+        control.grid(row=row + 1, column=0, sticky="ew", pady=(0, 10))
+        return label
+
     def _build_geometry_settings(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="Input path", style="Secondary.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
-        self.input_path_entry = ttk.Entry(
-            parent,
-            textvariable=self.parent_var,
-            style="App.TEntry",
-        )
-        self.input_path_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        self.input_path_entry = ttk.Entry(parent, textvariable=self.parent_var, style="App.TEntry")
+        self._settings_field(parent, 0, "Input folder or KML / KMZ", self.input_path_entry)
         input_buttons = ttk.Frame(parent, style="Card.TFrame")
-        input_buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 8))
-        input_buttons.columnconfigure((0, 1), weight=1)
+        input_buttons.grid(row=2, column=0, sticky="ew", pady=(0, 20))
+        input_buttons.columnconfigure((0, 1), weight=1, uniform="browse")
         self.drawer_browse_folder_button = ttk.Button(
-            input_buttons,
-            text="Browse Folder…",
-            style="Secondary.TButton",
-            command=self._browse_parent,
-        )
+            input_buttons, text="JPG folder…", style="Secondary.TButton", command=self._browse_parent)
         self.drawer_browse_folder_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.drawer_browse_vector_button = ttk.Button(
-            input_buttons,
-            text="Browse KML/KMZ…",
-            style="Secondary.TButton",
-            command=self._browse_kmz,
-        )
+            input_buttons, text="KML / KMZ…", style="Secondary.TButton", command=self._browse_kmz)
         self.drawer_browse_vector_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-
-        ttk.Label(parent, text="Buffer (feet)", style="Secondary.TLabel").grid(
-            row=2,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
-        self.buffer_entry = ttk.Entry(
-            parent,
-            textvariable=self.buffer_var,
-            width=16,
-            style="App.TEntry",
-        )
-        self.buffer_entry.grid(row=2, column=1, sticky="ew", pady=4)
-
-        self.outline_mode_label = ttk.Label(
-            parent,
-            text="Outline mode",
-            style="Secondary.TLabel",
-        )
-        self.outline_mode_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.buffer_entry = ttk.Entry(parent, textvariable=self.buffer_var, style="App.TEntry")
+        self._settings_field(parent, 3, "Boundary buffer · feet", self.buffer_entry)
         self.outline_mode_combo = ttk.Combobox(
-            parent,
-            textvariable=self.outline_mode_var,
-            values=list(OUTLINE_MODE_LABELS.keys()),
-            state="readonly",
-            style="App.TCombobox",
-        )
-        self.outline_mode_combo.grid(row=3, column=1, sticky="ew", pady=4)
-
-        self.simplify_vector_label = ttk.Label(
-            parent,
-            text="Vector output",
-            style="Secondary.TLabel",
-        )
-        self.simplify_vector_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+            parent, textvariable=self.outline_mode_var, values=list(OUTLINE_MODE_LABELS.keys()),
+            state="readonly", style="App.TCombobox")
+        self.outline_mode_label = self._settings_field(parent, 5, "Outline mode", self.outline_mode_combo)
+        self.simplify_vector_label = ttk.Label(parent, text="KML / KMZ sources", style="Secondary.TLabel")
+        self.simplify_vector_label.grid(row=7, column=0, sticky="w", pady=(0, 6))
         self.simplify_vector_checkbutton = ttk.Checkbutton(
-            parent,
-            text="Simplify KML/KMZ output vertices",
-            variable=self.simplify_vector_var,
-            style="Surface.TCheckbutton",
-        )
-        self.simplify_vector_checkbutton.grid(row=4, column=1, sticky="w", pady=4)
+            parent, text="Simplify output vertices", variable=self.simplify_vector_var,
+            style="Surface.TCheckbutton")
+        self.simplify_vector_checkbutton.grid(row=8, column=0, sticky="w", pady=(0, 8))
 
     def _build_section_settings(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="# of Shapes", style="Secondary.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
         self.section_count_spinbox = ttk.Spinbox(
-            parent,
-            from_=1,
-            to=MAX_SECTION_COUNT,
-            textvariable=self.section_count_var,
-            width=8,
-            style="App.TSpinbox",
-        )
-        self.section_count_spinbox.grid(row=0, column=1, sticky="ew", pady=4)
-
-        self.overlap_label = ttk.Label(
-            parent,
-            text="Overlap (feet)",
-            style="Secondary.TLabel",
-        )
-        self.overlap_label.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.overlap_entry = ttk.Entry(
-            parent,
-            textvariable=self.overlap_var,
-            style="App.TEntry",
-        )
-        self.overlap_entry.grid(row=1, column=1, sticky="ew", pady=4)
-
-        self.shape_label_label = ttk.Label(
-            parent,
-            text="Shape Label",
-            style="Secondary.TLabel",
-        )
-        self.shape_label_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.shape_label_entry = ttk.Entry(
-            parent,
-            textvariable=self.shape_label_var,
-            style="App.TEntry",
-        )
-        self.shape_label_entry.grid(row=2, column=1, sticky="ew", pady=4)
-
-        self.split_direction_label = ttk.Label(
-            parent,
-            text="Split direction",
-            style="Secondary.TLabel",
-        )
-        self.split_direction_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+            parent, from_=1, to=MAX_SECTION_COUNT, textvariable=self.section_count_var,
+            width=8, style="App.TSpinbox")
+        self._settings_field(parent, 0, "Number of shapes", self.section_count_spinbox)
+        self.sections_hint = ttk.Label(parent, text="Use 2 or more shapes to enable splitting.",
+                                       style="Muted.TLabel", wraplength=320)
+        self.sections_hint.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        self.overlap_entry = ttk.Entry(parent, textvariable=self.overlap_var, style="App.TEntry")
+        self.overlap_label = self._settings_field(parent, 3, "Overlap · feet", self.overlap_entry)
+        self.shape_label_entry = ttk.Entry(parent, textvariable=self.shape_label_var, style="App.TEntry")
+        self.shape_label_label = self._settings_field(parent, 5, "Shape label", self.shape_label_entry)
         self.split_direction_combo = ttk.Combobox(
-            parent,
-            textvariable=self.split_direction_var,
-            values=SPLIT_DIRECTION_OPTIONS,
-            state="readonly",
-            style="App.TCombobox",
-        )
-        self.split_direction_combo.grid(row=3, column=1, sticky="ew", pady=4)
-
-        self.split_direction_custom_label = ttk.Label(
-            parent,
-            text="Custom degrees",
-            style="Secondary.TLabel",
-        )
-        self.split_direction_custom_label.grid(
-            row=4,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
+            parent, textvariable=self.split_direction_var, values=SPLIT_DIRECTION_OPTIONS,
+            state="readonly", style="App.TCombobox")
+        self.split_direction_label = self._settings_field(parent, 7, "Split direction", self.split_direction_combo)
         self.split_direction_custom_entry = ttk.Entry(
-            parent,
-            textvariable=self.split_direction_degrees_var,
-            style="App.TEntry",
-        )
-        self.split_direction_custom_entry.grid(row=4, column=1, sticky="ew", pady=4)
+            parent, textvariable=self.split_direction_degrees_var, style="App.TEntry")
+        self.split_direction_custom_label = self._settings_field(
+            parent, 9, "Custom angle · degrees", self.split_direction_custom_entry)
 
     def _build_output_settings(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="Output file name", style="Secondary.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
         output_name_frame = ttk.Frame(parent, style="Card.TFrame")
-        output_name_frame.grid(row=0, column=1, sticky="ew", pady=4)
         output_name_frame.columnconfigure(0, weight=1)
-        self.output_name_entry = ttk.Entry(
-            output_name_frame,
-            textvariable=self.output_name_var,
-            style="App.TEntry",
-        )
+        self.output_name_entry = ttk.Entry(output_name_frame, textvariable=self.output_name_var, style="App.TEntry")
         self.output_name_entry.grid(row=0, column=0, sticky="ew")
-        ttk.Label(
-            output_name_frame,
-            text=".kmz",
-            style="Secondary.TLabel",
-        ).grid(row=0, column=1, padx=(5, 0))
-
-        ttk.Label(parent, text="Output KMZ", style="Secondary.TLabel").grid(
-            row=1,
-            column=0,
-            sticky="w",
-            padx=(0, 8),
-            pady=4,
-        )
-        self.output_path_entry = ttk.Entry(
-            parent,
-            textvariable=self.output_var,
-            style="App.TEntry",
-        )
-        self.output_path_entry.grid(row=1, column=1, sticky="ew", pady=4)
-
+        ttk.Label(output_name_frame, text=".kmz", style="Secondary.TLabel").grid(row=0, column=1, padx=(8, 0))
+        self._settings_field(parent, 0, "File name", output_name_frame)
+        self.output_path_entry = ttk.Entry(parent, textvariable=self.output_var, style="App.TEntry")
+        self._settings_field(parent, 2, "Save location", self.output_path_entry)
         output_buttons = ttk.Frame(parent, style="Card.TFrame")
-        output_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        output_buttons.columnconfigure((0, 1), weight=1)
+        output_buttons.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+        output_buttons.columnconfigure((0, 1), weight=1, uniform="output")
         self.save_as_button = ttk.Button(
-            output_buttons,
-            text="Save As…",
-            style="Secondary.TButton",
-            command=self._browse_output,
-        )
+            output_buttons, text="Save as…", style="Secondary.TButton", command=self._browse_output)
         self.save_as_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.view_output_button = ttk.Button(
-            output_buttons,
-            text="View Output Folder",
-            style="Ghost.TButton",
-            command=self._view_output_folder,
-        )
+            output_buttons, text="Open folder", style="Ghost.TButton", command=self._view_output_folder)
         self.view_output_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
     def _build_preview_key_overlay(self, parent: ttk.Frame) -> None:
@@ -1513,50 +1501,52 @@ class BoundaryKmzApp:
             self.action_left_group,
             textvariable=self.status_var,
             style="Muted.TLabel",
-            width=28,
+            width=1,
         )
-        self.status_label.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        self.status_label.grid(row=0, column=1, columnspan=7, sticky="ew", padx=(0, 10))
         self.action_left_group.columnconfigure(1, weight=1)
 
+        self.quick_controls = ttk.Frame(self.action_left_group, style="ActionBar.TFrame")
+        self.quick_controls.grid(row=1, column=0, columnspan=8, sticky="w", pady=(10, 0))
         ttk.Label(
-            self.action_left_group,
-            text="Buffer",
+            self.quick_controls,
+            text="Buffer (ft)",
             style="Secondary.TLabel",
-        ).grid(row=0, column=2, padx=(0, 4))
+        ).grid(row=0, column=0, padx=(0, 6), pady=0, sticky="w")
         self.quick_buffer_entry = ttk.Entry(
-            self.action_left_group,
+            self.quick_controls,
             textvariable=self.buffer_var,
             width=8,
             style="App.TEntry",
         )
-        self.quick_buffer_entry.grid(row=0, column=3, padx=(0, 8))
+        self.quick_buffer_entry.grid(row=0, column=1, padx=(0, 16), pady=0, sticky="w")
         ttk.Label(
-            self.action_left_group,
+            self.quick_controls,
             text="Shapes",
             style="Secondary.TLabel",
-        ).grid(row=0, column=4, padx=(0, 4))
+        ).grid(row=0, column=2, padx=(0, 6), pady=0)
         self.quick_section_count_spinbox = ttk.Spinbox(
-            self.action_left_group,
+            self.quick_controls,
             from_=1,
             to=MAX_SECTION_COUNT,
             textvariable=self.section_count_var,
             width=5,
             style="App.TSpinbox",
         )
-        self.quick_section_count_spinbox.grid(row=0, column=5, padx=(0, 8))
+        self.quick_section_count_spinbox.grid(row=0, column=3, padx=(0, 16), pady=0)
         self.quick_overlap_label = ttk.Label(
-            self.action_left_group,
-            text="Overlap",
+            self.quick_controls,
+            text="Overlap (ft)",
             style="Secondary.TLabel",
         )
-        self.quick_overlap_label.grid(row=0, column=6, padx=(0, 4))
+        self.quick_overlap_label.grid(row=0, column=4, padx=(0, 6), pady=0)
         self.quick_overlap_entry = ttk.Entry(
-            self.action_left_group,
+            self.quick_controls,
             textvariable=self.overlap_var,
             width=7,
             style="App.TEntry",
         )
-        self.quick_overlap_entry.grid(row=0, column=7)
+        self.quick_overlap_entry.grid(row=0, column=5, pady=0)
 
         self.busy_progress = ttk.Progressbar(
             self.action_right_group,
@@ -1588,6 +1578,17 @@ class BoundaryKmzApp:
             command=self._export_clicked,
         )
         self.export_button.grid(row=0, column=3)
+        self.export_destination_label = ttk.Label(
+            self.action_right_group, textvariable=self.output_name_var,
+            style="Muted.TLabel", anchor="e", width=1,
+        )
+        self.export_destination_label.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(5, 0))
+        self.open_export_button = ttk.Button(
+            self.action_right_group, text="Open saved folder", style="Ghost.TButton",
+            command=self._open_last_export,
+        )
+        self.open_export_button.grid(row=2, column=1, columnspan=3, sticky="e", pady=(4, 0))
+        self.open_export_button.grid_remove()
 
         self._populate_widget_state_registries()
         self.root.update_idletasks()
@@ -1647,30 +1648,21 @@ class BoundaryKmzApp:
     def _toggle_settings_group(self, group: str) -> None:
         if group not in self._settings_group_frames:
             return
-        self._active_settings_group = (
-            None if self._active_settings_group == group else group
-        )
+        self._active_settings_group = group
+        self.settings_title.configure(text={
+            "input": "Boundary settings", "sections": "Section settings", "output": "Export settings",
+        }[group])
         for key, frame in self._settings_group_frames.items():
-            title = {
-                "input": "Input & Geometry",
-                "sections": "Sections",
-                "output": "Output",
-            }[key]
-            expanded = key == self._active_settings_group
-            self._settings_group_buttons[key].configure(
-                text=("▾ " if expanded else "▸ ") + title
-            )
-            if expanded:
+            if key == group:
                 frame.grid()
             else:
                 frame.grid_remove()
-        self.settings_canvas.after_idle(
-            lambda: self.settings_canvas.configure(
-                scrollregion=self.settings_canvas.bbox("all")
-            )
-        )
+        self.settings_canvas.yview_moveto(0)
+        self.settings_canvas.after_idle(lambda: self._update_settings_scrollregion(None))
+        self._refresh_settings_triggers()
 
     def _toggle_settings_drawer(self) -> None:
+        self._close_view_menu()
         if self._settings_drawer_open:
             self._close_settings_drawer()
             return
@@ -1683,8 +1675,10 @@ class BoundaryKmzApp:
         self._settings_drawer_open = False
         if hasattr(self, "settings_drawer"):
             self.settings_drawer.place_forget()
+        self._refresh_settings_triggers()
 
     def _open_input_settings(self) -> None:
+        self._close_view_menu()
         self._close_preview_key()
         self._settings_drawer_open = True
         if self._active_settings_group != "input":
@@ -1697,7 +1691,7 @@ class BoundaryKmzApp:
     def _place_settings_drawer(self) -> None:
         self.preview_stack.update_idletasks()
         available = max(self.preview_stack.winfo_width() - 24, 300)
-        width = min(SETTINGS_DRAWER_WIDTH, available)
+        width = min(max(SETTINGS_DRAWER_WIDTH, self.settings_content.winfo_reqwidth() + 40), available)
         self.settings_drawer.place(
             relx=1.0,
             rely=0.0,
@@ -1706,8 +1700,17 @@ class BoundaryKmzApp:
             anchor="ne",
         )
         self.settings_drawer.after_idle(self._refresh_settings_scrollbar)
+        self._refresh_settings_triggers()
+
+    def _refresh_settings_triggers(self) -> None:
+        for key, button in (("input", self.settings_button), ("sections", self.sections_settings_button),
+                            ("output", self.output_settings_button)):
+            active = self._settings_drawer_open and key == self._active_settings_group
+            button.configure(style="Primary.TButton" if active else "Ghost.TButton")
+        self._place_empty_input_overlay()
 
     def _toggle_preview_key(self) -> None:
+        self._close_view_menu()
         if self._legend_open:
             self._close_preview_key()
             return
@@ -1734,6 +1737,10 @@ class BoundaryKmzApp:
         )
 
     def _close_topmost_overlay(self) -> bool:
+        if self._view_menu_open:
+            self._close_view_menu()
+            self.view_button.focus_set()
+            return True
         if self._settings_drawer_open:
             self._close_settings_drawer()
             return True
@@ -1802,11 +1809,12 @@ class BoundaryKmzApp:
     def _refresh_drawer_summaries(self) -> None:
         summaries = {
             "input": (
-                f"Buffer {self.buffer_var.get().strip() or '—'} · "
+                f"Buffer {self.buffer_var.get().strip() or '—'} ft · "
                 f"{self.outline_mode_var.get().strip() or 'Auto'}"
             ),
             "sections": (
-                f"{self.section_count_var.get().strip() or '—'} shape(s)"
+                f"{self.section_count_var.get().strip() or '—'} "
+                f"{'shape' if self.section_count_var.get().strip() == '1' else 'shapes'}"
             ),
             "output": self.output_name_var.get().strip() or "Unnamed",
         }
@@ -1816,91 +1824,88 @@ class BoundaryKmzApp:
                 label.configure(text=text[:34])
 
     def _on_root_configure(self, event: object) -> None:
-        if getattr(event, "widget", None) is not self.root:
+        if getattr(event, "widget", None) is not self.root or self._closing:
             return
+        # Resize events arrive in bursts. A single idle pass prevents repeated
+        # geometry negotiation from competing with map drawing and input.
+        if self._layout_after_id is None:
+            self._layout_after_id = self.root.after_idle(self._refresh_workspace_layout)
+
+    def _refresh_workspace_layout(self) -> None:
+        self._layout_after_id = None
+        if self._closing:
+            return
+        self._refresh_header_layout()
+        self._refresh_action_bar_layout()
         if self._settings_drawer_open:
             self._place_settings_drawer()
         elif self._legend_open:
             self._place_preview_key()
-        width = int(getattr(event, "width", 0)) or None
-        self._refresh_header_layout(width)
-        self._refresh_action_bar_layout(width)
+        available = max(250, self.preview_stack.winfo_width() - 64)
+        self.drop_label.configure(wraplength=min(440, available - 56))
+        self.empty_hint_label.configure(wraplength=min(440, available - 56))
+        self._empty_full_height = max(
+            getattr(self, "_empty_full_height", 0), self.empty_input_overlay.winfo_reqheight()
+        )
+        short_preview = self.preview_stack.winfo_height() < max(300, self._empty_full_height + 16)
+        self.empty_input_overlay.configure(padding=(20, 6) if short_preview else (28, 24))
+        self.drop_label.configure(pady=3 if short_preview else 22)
+        self.empty_title_label.configure(
+            text="Start a new boundary" if short_preview else "From flight to finished outline",
+            font=("Segoe UI", 15 if short_preview else 20, "bold"),
+        )
+        for label in (self.empty_caption_label, self.empty_hint_label):
+            if short_preview:
+                label.grid_remove()
+            else:
+                label.grid()
+        self._place_empty_input_overlay()
+        if hasattr(self, "imagery_status_label"):
+            # Keep navigation and the imagery checkbox available on narrow views.
+            if self.preview_toolbar_frame.winfo_width() < 720:
+                self.imagery_status_label.grid_remove()
+            else:
+                self.imagery_status_label.grid()
 
     def _refresh_header_layout(self, width: int | None = None) -> None:
-        if not hasattr(self, "header_frame"):
+        if not hasattr(self, "header_actions"):
             return
-        self.root.update_idletasks()
-        fixed_width = (
-            self.app_title_label.winfo_reqwidth()
-            + self.change_input_button.winfo_reqwidth()
-            + self.key_button.winfo_reqwidth()
-            + self.settings_button.winfo_reqwidth()
-            + self.focus_button.winfo_reqwidth()
-            + self.expand_preview_button.winfo_reqwidth()
-            + 130
-        )
-        self._header_breakpoint = max(HEADER_MIN_BREAKPOINT, fixed_width)
         current_width = width or self.root.winfo_width()
-        compact = current_width < self._header_breakpoint
-        if compact == self._header_compact:
-            return
-
-        self._header_compact = compact
-        for widget in (
-            self.app_title_label,
-            self.compact_input_target,
-            self.change_input_button,
-            self.key_button,
-            self.settings_button,
-            self.focus_button,
-            self.expand_preview_button,
-        ):
-            widget.grid_forget()
-
-        show_title = not self._focus_mode and self._focus_title_was_mapped
-        if compact:
-            if show_title:
-                self.app_title_label.grid(
-                    row=0,
-                    column=0,
-                    sticky="w",
-                    padx=(0, 10),
-                )
-            self.compact_input_target.grid(
-                row=0,
-                column=1,
-                columnspan=6,
-                sticky="ew",
-            )
-            self.change_input_button.grid(row=1, column=0, pady=(6, 0))
-            self.key_button.grid(row=1, column=1, padx=(6, 0), pady=(6, 0))
-            self.settings_button.grid(row=1, column=2, padx=(6, 0), pady=(6, 0))
-            self.focus_button.grid(row=1, column=3, padx=(6, 0), pady=(6, 0))
-            self.expand_preview_button.grid(
-                row=1,
-                column=4,
-                padx=(6, 0),
-                pady=(6, 0),
-            )
+        short = self.root.winfo_height() < 700 or self._focus_mode
+        self.brand_frame.configure(padding=(18, 6 if short else 12))
+        if short:
+            self.brand_caption.grid_remove()
         else:
-            if show_title:
-                self.app_title_label.grid(
-                    row=0,
-                    column=0,
-                    sticky="w",
-                    padx=(0, 14),
-                )
-            self.compact_input_target.grid(
-                row=0,
-                column=1,
-                sticky="ew",
-                padx=(0, 8),
-            )
-            self.change_input_button.grid(row=0, column=2, padx=(0, 6))
-            self.key_button.grid(row=0, column=3, padx=(0, 6))
-            self.settings_button.grid(row=0, column=4, padx=(0, 6))
-            self.focus_button.grid(row=0, column=5, padx=(0, 6))
-            self.expand_preview_button.grid(row=0, column=6)
+            self.brand_caption.grid()
+        buttons = (self.change_input_button, self.settings_button,
+                   self.sections_settings_button, self.output_settings_button, self.view_button)
+        action_width = sum(button.winfo_reqwidth() + 6 for button in buttons)
+        self._header_breakpoint = max(HEADER_MIN_BREAKPOINT, action_width + 300)
+        compact = current_width < self._header_breakpoint
+        self._header_compact = compact
+        self.compact_input_target.grid(row=0, column=0, columnspan=2 if compact else 1,
+                                       sticky="ew", padx=(0, 0 if compact else 12))
+        self.header_actions.grid(row=1 if compact else 0, column=0 if compact else 1,
+                                 columnspan=2 if compact else 1,
+                                 sticky="w" if compact else "e", pady=(8, 0) if compact else 0)
+        row = column = used = 0
+        available = max(250, current_width - 64)
+        for button in buttons:
+            requested = button.winfo_reqwidth() + 6
+            if used and used + requested > available:
+                row += 1
+                column = used = 0
+            button.grid(row=row, column=column, padx=(0, 6), pady=(3 if row else 0, 0))
+            used += requested
+            column += 1
+        if current_width < 1040 or self._focus_mode:
+            self.workflow_label.grid_remove()
+        else:
+            self.workflow_label.grid()
+        if not self._focus_mode and self._focus_title_was_mapped:
+            self.app_title_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+        else:
+            self.app_title_label.grid_remove()
 
     def _refresh_action_bar_layout(self, width: int | None = None) -> None:
         if not hasattr(self, "action_left_group"):
@@ -1908,7 +1913,7 @@ class BoundaryKmzApp:
         self.root.update_idletasks()
         self._action_bar_breakpoint = max(
             ACTION_BAR_MIN_BREAKPOINT,
-            self.action_left_group.winfo_reqwidth()
+            max(self.quick_controls.winfo_reqwidth(), self.preview_state_label.winfo_reqwidth() + 80)
             + self.action_right_group.winfo_reqwidth()
             + 32,
         )
@@ -1920,9 +1925,13 @@ class BoundaryKmzApp:
         self.action_left_group.grid_forget()
         self.action_right_group.grid_forget()
         if compact:
+            # Named settings menus retain every control when this duplicate
+            # quick-edit row would squeeze the primary actions.
+            self.quick_controls.grid_remove()
             self.action_left_group.grid(row=0, column=0, sticky="ew")
             self.action_right_group.grid(row=1, column=0, sticky="e", pady=(8, 0))
         else:
+            self.quick_controls.grid()
             self.action_left_group.grid(row=0, column=0, sticky="ew")
             self.action_right_group.grid(row=0, column=1, sticky="e", padx=(12, 0))
 
@@ -1931,21 +1940,28 @@ class BoundaryKmzApp:
         self._has_selected_input = bool(text)
         if text:
             path = self._path_from_text(text)
-            display = str(path)
-            if len(display) > 78:
-                display = f"…{display[-77:]}"
-            self.input_summary_var.set(f"Input: {display}")
+            kind = "KML / KMZ" if self._is_vector_file_path(path) else "JPG FOLDER"
+            self.input_summary_var.set(f"{kind}  ·  {path.name or str(path)}")
             if hasattr(self, "empty_input_overlay"):
                 self.empty_input_overlay.place_forget()
         else:
             self.input_summary_var.set("No input selected — drop or browse to begin")
             if hasattr(self, "empty_input_overlay"):
-                self.empty_input_overlay.place(
-                    relx=0.5,
-                    rely=0.5,
-                    anchor="center",
-                )
-                self.empty_input_overlay.lift()
+                self._place_empty_input_overlay()
+
+    def _place_empty_input_overlay(self) -> None:
+        if not hasattr(self, "empty_input_overlay"):
+            return
+        if self.parent_var.get().strip():
+            self.empty_input_overlay.place_forget()
+            return
+        available = self.preview_stack.winfo_width()
+        if self._settings_drawer_open:
+            available -= int(self.settings_drawer.place_info().get("width", SETTINGS_DRAWER_WIDTH))
+            if available < self.empty_input_overlay.winfo_reqwidth() + 24:
+                self.empty_input_overlay.place_forget()
+                return
+        self.empty_input_overlay.place(relx=0, x=available / 2, rely=0.5, anchor="center")
 
     def _register_keyboard_shortcuts(self) -> None:
         self.root.bind("<F5>", self._shortcut_update_preview, add="+")
@@ -1985,6 +2001,7 @@ class BoundaryKmzApp:
         return "break"
 
     def _toggle_focus_mode(self) -> None:
+        self._close_view_menu()
         if self._focus_mode:
             self._exit_focus_mode()
         else:
@@ -2464,8 +2481,8 @@ class BoundaryKmzApp:
             getattr(self, "drop_label", self.compact_input_target),
         )
 
-    @staticmethod
     def _set_drop_surface_active(
+        self,
         surface: tk.Widget,
         *,
         active: bool,
@@ -2476,9 +2493,9 @@ class BoundaryKmzApp:
             if warning
             else "#1e3a5f"
             if active
-            else "#202838"
+            else PALETTE.BACKGROUND if surface is self.compact_input_target else PALETTE.SURFACE_RAISED
         )
-        border = "#f59e0b" if warning else "#60a5fa" if active else "#3b4a63"
+        border = PALETTE.WARNING if warning else PALETTE.FOCUS_INFO if active else PALETTE.BORDER
         try:
             surface.configure(
                 background=background,
@@ -2528,9 +2545,28 @@ class BoundaryKmzApp:
         else:
             self.status_var.set(f"Input set: {input_path}")
 
+    @staticmethod
+    def _browse_initial_directory() -> str:
+        if sys.platform == "win32":
+            # Tk 8.6 normalizes a bare ::{CLSID} into an invalid shell address.
+            # A Windows shell namespace folder survives normalization and opens
+            # This PC without replacing the native dialogs or changing Explorer.
+            # https://learn.microsoft.com/windows/win32/shell/nse-junction
+            local_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+            location = local_data / "JpgBoundaryToKmz" / "Shell" / "This PC.{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+            try:
+                location.mkdir(parents=True, exist_ok=True)
+                return str(location)
+            except OSError:
+                pass
+        return str(Path.home())
+
     def _browse_parent(self) -> None:
+        if self._busy:
+            return
         folder = filedialog.askdirectory(
             title="Choose parent folder containing JPGs",
+            initialdir=self._browse_initial_directory(),
             parent=self.root,
         )
         if not folder:
@@ -2538,14 +2574,8 @@ class BoundaryKmzApp:
         self._set_input_path(Path(folder))
 
     def _browse_kmz(self) -> None:
-        initial = self.parent_var.get().strip()
-        if initial:
-            initial_path = self._path_from_text(initial)
-            initial_dir = str(
-                initial_path.parent if initial_path.is_file() else initial_path
-            )
-        else:
-            initial_dir = str(Path.cwd())
+        if self._busy:
+            return
         kmz_path = filedialog.askopenfilename(
             title="Choose KML or KMZ vector input",
             filetypes=[
@@ -2554,7 +2584,7 @@ class BoundaryKmzApp:
                 ("KMZ files", "*.kmz"),
                 ("All files", "*.*"),
             ],
-            initialdir=initial_dir,
+            initialdir=self._browse_initial_directory(),
             parent=self.root,
         )
         if not kmz_path:
@@ -2565,13 +2595,12 @@ class BoundaryKmzApp:
         initial = self.output_var.get().strip()
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         initial_path = self._resolve_output_path(initial) if initial else None
-        initial_dir = str(initial_path.parent if initial_path else DEFAULT_OUTPUT_DIR)
         initial_file = initial_path.name if initial_path else "jpg_camera_boundary.kmz"
         output = filedialog.asksaveasfilename(
             title="Save KMZ boundary",
             defaultextension=".kmz",
             filetypes=[("KMZ files", "*.kmz"), ("All files", "*.*")],
-            initialdir=initial_dir,
+            initialdir=self._browse_initial_directory(),
             initialfile=initial_file,
             parent=self.root,
         )
@@ -2743,6 +2772,17 @@ class BoundaryKmzApp:
         ]
         for widget in custom_widgets:
             widget.configure(state=custom_state)
+        # Keep the selected angle visible during work, but omit it until Custom
+        # is selected. Disabling a worker's controls must not shift the form.
+        for widget in (self.split_direction_custom_label, self.split_direction_custom_entry):
+            if multiple_sections and self.split_direction_var.get() == "Custom":
+                widget.grid()
+            else:
+                widget.grid_remove()
+        self.sections_hint.configure(text=(
+            "Overlap is shared between neighboring shapes." if multiple_sections
+            else "Use 2 or more shapes to enable splitting."
+        ))
         if hasattr(self, "quick_overlap_label"):
             if multiple_sections:
                 self.quick_overlap_label.grid()
@@ -2792,6 +2832,8 @@ class BoundaryKmzApp:
             self._shape_label_touched = False
 
     def _scan_clicked(self) -> None:
+        if self._busy:
+            return
         try:
             (
                 input_path,
@@ -2850,6 +2892,8 @@ class BoundaryKmzApp:
         worker.start()
 
     def _export_clicked(self) -> None:
+        if self._busy:
+            return
         try:
             (
                 input_path,
@@ -2969,6 +3013,8 @@ class BoundaryKmzApp:
         self._queue.put(("export_done", (result, saved_path)))
 
     def _drain_queue(self) -> None:
+        if self._closing:
+            return
         while True:
             try:
                 kind, payload = self._queue.get_nowait()
@@ -3045,56 +3091,19 @@ class BoundaryKmzApp:
         self.root.after(100, self._drain_queue)
 
     def _show_export_success(self, saved_path: Path) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.withdraw()
-        dialog.title("KMZ exported")
-        dialog.transient(self.root)
-        dialog.resizable(False, False)
-        dialog.columnconfigure(0, weight=1)
-        style_app_toplevel(dialog)
+        """Keep completion inline so the user can immediately continue editing."""
+        self._last_export_path = saved_path
+        self.status_var.set(f"Saved {saved_path.name}")
+        self.open_export_button.grid()
+        self._refresh_action_bar_layout()
 
-        content = ttk.Frame(dialog, padding=(20, 16, 20, 12))
-        content.grid(row=0, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=1)
-
-        ttk.Label(content, text="Saved:").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            content,
-            text=str(saved_path),
-            justify="left",
-            wraplength=460,
-        ).grid(row=1, column=0, sticky="ew", pady=(8, 16))
-
-        buttons = ttk.Frame(content)
-        buttons.grid(row=2, column=0, sticky="e")
-
-        def view_saved_folder() -> None:
-            try:
-                self._open_output_folder(saved_path.parent)
-                self.status_var.set(f"Opened output folder: {saved_path.parent}")
-            except Exception as error:
-                messagebox.showerror(
-                    "Open output folder failed",
-                    str(error),
-                    parent=dialog,
-                )
-
-        ttk.Button(
-            buttons,
-            text="View Output Folder",
-            command=view_saved_folder,
-        ).grid(row=0, column=0, padx=(0, 8))
-        ok_button = ttk.Button(buttons, text="OK", command=dialog.destroy)
-        ok_button.grid(row=0, column=1)
-
-        dialog.bind("<Escape>", lambda _event: dialog.destroy())
-        dialog.bind("<Return>", lambda _event: dialog.destroy())
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        self._center_child_window(dialog)
-        apply_native_chrome(dialog)
-        dialog.deiconify()
-        dialog.grab_set()
-        ok_button.focus_set()
+    def _open_last_export(self) -> None:
+        if self._last_export_path is None:
+            return
+        try:
+            self._open_output_folder(self._last_export_path.parent)
+        except Exception as error:
+            messagebox.showerror("Open output folder failed", str(error), parent=self.root)
 
     def _center_child_window(self, window: tk.Toplevel) -> None:
         clamp_child_geometry(self.root, window)
@@ -3537,20 +3546,20 @@ class BoundaryKmzApp:
         style_matplotlib_axes(figure, axes)
         axes.set_axis_off()
         axes.format_coord = lambda _x, _y: ""
-        axes.text(
-            0.5,
-            0.5,
-            "Preview will appear after Update Preview",
-            ha="center",
-            va="center",
-            transform=axes.transAxes,
-            color=PALETTE.TEXT_SECONDARY,
-        )
+        # The main workspace has a welcome card and a persistent status bar.
+        # An extra map caption can protrude from behind the settings panel.
+        if axes is not self.axes:
+            axes.text(
+                0.5, 0.5, "Preview will appear after Update Preview",
+                ha="center", va="center", transform=axes.transAxes,
+                color=PALETTE.TEXT_SECONDARY,
+            )
         figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         if canvas is not None:
             canvas.draw_idle()
 
     def _open_fullscreen_preview(self) -> None:
+        self._close_view_menu()
         if self._fullscreen_window_exists():
             assert self._fullscreen_window is not None
             self._maximize_fullscreen_window(self._fullscreen_window)
@@ -4331,6 +4340,16 @@ class BoundaryKmzApp:
     def _set_busy(self, busy: bool, status: str) -> None:
         self._busy = busy
         if busy:
+            self._close_view_menu()
+            self._close_settings_drawer()
+            self._busy_message = "Exporting your KMZ…" if "Export" in status else "Building your boundary…"
+            self._busy_started_at = time.monotonic()
+            if self._busy_after_id is not None:
+                self.root.after_cancel(self._busy_after_id)
+            self._refresh_activity()
+            self.scan_button.configure(text="Building…" if "Export" not in status else "Update Preview")
+            self.export_button.configure(text="Exporting…" if "Export" in status else "Export KMZ")
+            self.open_export_button.grid_remove()
             self._preview_error = ""
             for widget in (
                 self._all_mutation_widgets
@@ -4346,6 +4365,12 @@ class BoundaryKmzApp:
             self.busy_progress.grid()
             self.busy_progress.start(12)
         else:
+            if self._busy_after_id is not None:
+                self.root.after_cancel(self._busy_after_id)
+                self._busy_after_id = None
+            self.activity_overlay.place_forget()
+            self.scan_button.configure(text="Update Preview")
+            self.export_button.configure(text="Export KMZ")
             self.busy_progress.stop()
             self.busy_progress.grid_remove()
             for widget in self._all_mutation_widgets:
@@ -4381,6 +4406,7 @@ class BoundaryKmzApp:
             )
         self.status_var.set(status)
         self._refresh_preview_state_badge()
+        self._refresh_action_bar_layout()
 
     def _invalidate_cache(self) -> None:
         self._cached_result = None
