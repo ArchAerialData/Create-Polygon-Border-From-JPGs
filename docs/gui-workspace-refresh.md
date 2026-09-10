@@ -38,9 +38,19 @@ embedding those applications or copying their runtime dependencies.
   measured responsive layouts, busy feedback, duplicate-submit guards, and
   nonmodal export completion linked to the actual saved destination.
 - The worker arguments, generation profiles, cache keys, and export calls
-  retain their existing behavior. A result is still generated only on request.
+  retain their existing behavior. New inputs automatically generate a preview;
+  subsequent settings edits are applied with Update Preview.
 
 ## Validation
+
+Field labels now use a dedicated white style in normal and disabled states.
+Loading via Browse, drop, or committing the input field resets buffer to zero
+and outline mode to Auto, then starts the existing background preview worker.
+Polygon inputs retain zero buffer; line inputs use the existing Auto search and
+effective-buffer synchronization. Tests cover actual polygon and line geometry
+through the worker/result queue, folder loading, typed-path and drop triggers,
+and white disabled headings. Re-focusing an already loaded path preserves edits
+and does not launch another preview.
 
 Browse dialogs now start at This PC on Windows. Tk 8.6 normalizes bare shell
 addresses, so the app creates a reusable empty shell namespace folder under

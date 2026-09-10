@@ -710,6 +710,12 @@ def _configure_label_styles(style: ttk.Style) -> None:
         )
 
 
+    # Field headings remain legible when the associated editor is unavailable.
+    style.configure("Field.TLabel", background=PALETTE.SURFACE, foreground=PALETTE.TEXT)
+    style.map("Field.TLabel", background=[("disabled", PALETTE.SURFACE)],
+              foreground=[("disabled", PALETTE.TEXT)])
+
+
 def _configure_input_styles(style: ttk.Style) -> None:
     common = {
         "background": PALETTE.SURFACE_RAISED,

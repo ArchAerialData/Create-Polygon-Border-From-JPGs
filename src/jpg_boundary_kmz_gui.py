@@ -173,6 +173,7 @@ class BoundaryKmzApp:
         self._stale_reason = ""
         self._preview_error = ""
         self._last_input_text = ""
+        self._loaded_input_text = ""
         self._busy = False
         self._settings_drawer_open = False
         self._legend_open = False
@@ -1375,7 +1376,7 @@ class BoundaryKmzApp:
     @staticmethod
     def _settings_field(parent: ttk.Frame, row: int, text: str, control) -> ttk.Label:
         """Keep labels above full-width native controls for readable narrow panels."""
-        label = ttk.Label(parent, text=text, style="Secondary.TLabel")
+        label = ttk.Label(parent, text=text, style="Field.TLabel")
         label.grid(row=row, column=0, sticky="w", pady=(0, 5))
         control.grid(row=row + 1, column=0, sticky="ew", pady=(0, 10))
         return label
@@ -1383,6 +1384,9 @@ class BoundaryKmzApp:
     def _build_geometry_settings(self, parent: ttk.Frame) -> None:
         self.input_path_entry = ttk.Entry(parent, textvariable=self.parent_var, style="App.TEntry")
         self._settings_field(parent, 0, "Input folder or KML / KMZ", self.input_path_entry)
+        self.input_path_entry.bind("<Return>", self._commit_input_entry)
+        self.input_path_entry.bind("<FocusOut>", self._commit_input_entry)
+        self.input_path_entry.bind("<Control-Return>", self._shortcut_update_preview)
         input_buttons = ttk.Frame(parent, style="Card.TFrame")
         input_buttons.grid(row=2, column=0, sticky="ew", pady=(0, 20))
         input_buttons.columnconfigure((0, 1), weight=1, uniform="browse")
@@ -1398,7 +1402,7 @@ class BoundaryKmzApp:
             parent, textvariable=self.outline_mode_var, values=list(OUTLINE_MODE_LABELS.keys()),
             state="readonly", style="App.TCombobox")
         self.outline_mode_label = self._settings_field(parent, 5, "Outline mode", self.outline_mode_combo)
-        self.simplify_vector_label = ttk.Label(parent, text="KML / KMZ sources", style="Secondary.TLabel")
+        self.simplify_vector_label = ttk.Label(parent, text="KML / KMZ sources", style="Field.TLabel")
         self.simplify_vector_label.grid(row=7, column=0, sticky="w", pady=(0, 6))
         self.simplify_vector_checkbutton = ttk.Checkbutton(
             parent, text="Simplify output vertices", variable=self.simplify_vector_var,
@@ -1511,7 +1515,7 @@ class BoundaryKmzApp:
         ttk.Label(
             self.quick_controls,
             text="Buffer (ft)",
-            style="Secondary.TLabel",
+            style="Field.TLabel",
         ).grid(row=0, column=0, padx=(0, 6), pady=0, sticky="w")
         self.quick_buffer_entry = ttk.Entry(
             self.quick_controls,
@@ -1523,7 +1527,7 @@ class BoundaryKmzApp:
         ttk.Label(
             self.quick_controls,
             text="Shapes",
-            style="Secondary.TLabel",
+            style="Field.TLabel",
         ).grid(row=0, column=2, padx=(0, 6), pady=0)
         self.quick_section_count_spinbox = ttk.Spinbox(
             self.quick_controls,
@@ -1537,7 +1541,7 @@ class BoundaryKmzApp:
         self.quick_overlap_label = ttk.Label(
             self.quick_controls,
             text="Overlap (ft)",
-            style="Secondary.TLabel",
+            style="Field.TLabel",
         )
         self.quick_overlap_label.grid(row=0, column=4, padx=(0, 6), pady=0)
         self.quick_overlap_entry = ttk.Entry(
@@ -2541,9 +2545,7 @@ class BoundaryKmzApp:
         input_path = inputs[0]
         self._set_input_path(input_path)
         if len(inputs) > 1:
-            self.status_var.set(f"Using first dropped input: {input_path}")
-        else:
-            self.status_var.set(f"Input set: {input_path}")
+            self.status_var.set(f"Building preview for first dropped input: {input_path}")
 
     @staticmethod
     def _browse_initial_directory() -> str:
@@ -3603,7 +3605,7 @@ class BoundaryKmzApp:
         self._fullscreen_status_var = tk.StringVar(master=window, value="Ready.")
         self._fullscreen_imagery_status_var = tk.StringVar(master=window, value="")
 
-        section_count_label = ttk.Label(controls, text="# Shapes")
+        section_count_label = ttk.Label(controls, text="# Shapes", style="Field.TLabel")
         section_count_label.grid(row=0, column=0, sticky="w")
         section_spinbox = ttk.Spinbox(
             controls,
@@ -3614,7 +3616,7 @@ class BoundaryKmzApp:
         )
         section_spinbox.grid(row=0, column=1, sticky="w", padx=(4, 12))
 
-        overlap_label = ttk.Label(controls, text="Overlap")
+        overlap_label = ttk.Label(controls, text="Overlap", style="Field.TLabel")
         overlap_label.grid(row=0, column=2, sticky="w")
         overlap_entry = ttk.Entry(
             controls,
@@ -3623,7 +3625,7 @@ class BoundaryKmzApp:
         )
         overlap_entry.grid(row=0, column=3, sticky="w", padx=(4, 12))
 
-        shape_label = ttk.Label(controls, text="Label")
+        shape_label = ttk.Label(controls, text="Label", style="Field.TLabel")
         shape_label.grid(row=0, column=4, sticky="w")
         shape_entry = ttk.Entry(
             controls,
@@ -3632,7 +3634,7 @@ class BoundaryKmzApp:
         )
         shape_entry.grid(row=0, column=5, sticky="ew", padx=(4, 12))
 
-        split_label = ttk.Label(controls, text="Direction")
+        split_label = ttk.Label(controls, text="Direction", style="Field.TLabel")
         split_label.grid(row=0, column=6, sticky="w")
         self._fullscreen_split_direction_combo = ttk.Combobox(
             controls,
@@ -3651,6 +3653,7 @@ class BoundaryKmzApp:
         self._fullscreen_split_direction_custom_label = ttk.Label(
             controls,
             text="Degrees",
+            style="Field.TLabel",
         )
         self._fullscreen_split_direction_custom_label.grid(row=0, column=8, sticky="w")
         self._fullscreen_split_direction_custom_entry = ttk.Entry(
@@ -4412,11 +4415,27 @@ class BoundaryKmzApp:
         self._cached_result = None
         self._cached_settings = None
 
+    def _commit_input_entry(self, _event: object = None) -> None:
+        text = self.parent_var.get().strip()
+        if self._busy or not text or text == self._loaded_input_text:
+            return
+        path = self._path_from_text(text)
+        # A partial typed path is not a loaded input. Explicit Update Preview
+        # retains the normal validation message for invalid paths.
+        if path.is_dir() or self._is_vector_file_path(path):
+            self._set_input_path(path)
+
     def _set_input_path(self, input_path: Path) -> None:
+        if self._busy:
+            return
+        self._loaded_input_text = str(input_path)
         self.parent_var.set(str(input_path))
+        self.buffer_var.set("0")
+        self.outline_mode_var.set("Auto")
         self._set_output_path(self._default_output_path(input_path))
         self._update_outline_mode_state()
         self._invalidate_cache()
+        self._scan_clicked()
 
     def _selected_outline_mode(self, input_path: Path) -> str:
         if self._is_vector_file_path(input_path):

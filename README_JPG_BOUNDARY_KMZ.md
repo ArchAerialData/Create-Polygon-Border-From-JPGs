@@ -40,7 +40,9 @@ In the app:
    `Sections` contains shape count, overlap, naming, and split direction.
    `Output` contains the KMZ name, destination, and vector export options remain
    in `Boundary > Input & Geometry`.
-3. Click `Update Preview` to inspect the result. The bottom bar also provides
+3. New inputs automatically preview in Auto mode at zero buffer. Linework that
+   needs width uses the existing Auto buffer search and shows its selected value.
+   After editing settings, click `Update Preview`. The bottom bar also provides
    quick buffer, shape-count, and overlap edits when there is room.
 4. Click `Export KMZ`. Completion appears inline, with `Open saved folder`
    pointing to the actual exported file's folder.
@@ -49,6 +51,9 @@ In the app:
 
 ## GUI layout and workflow
 
+- Field headings stay white, including headings for disabled controls. Loading
+  an input through Browse, drag-and-drop, or committing a typed path starts a
+  background preview with buffer reset to zero and outline mode reset to Auto.
 - On Windows, JPG-folder, KML/KMZ, and Save As dialogs start at **This PC**.
   Other platforms start at the home folder. The suggested output filename is retained.
 - The AALLC-inspired navy header, charcoal surfaces, blue primary controls,

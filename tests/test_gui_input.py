@@ -47,6 +47,75 @@ from jpg_boundary_gui_window import OuterWindowBounds, WorkArea  # noqa: E402
 
 
 class GuiInputTests(TestCase):
+    def test_loading_folder_starts_zero_buffer_auto_preview(self) -> None:
+        with TemporaryDirectory() as tmp, _app() as app, patch.object(app, "_start_preview_generation") as start:
+            app.buffer_var.set("75")
+            app.outline_mode_var.set("Concave hull")
+            with patch.object(gui_module.filedialog, "askdirectory", return_value=tmp):
+                app._browse_parent()
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(start.call_args.args[0:2], (Path(tmp), 0.0))
+            self.assertEqual(app.outline_mode_var.get(), "Auto")
+            app.buffer_var.set("12")
+            app._commit_input_entry()
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(app.buffer_var.get(), "12")
+
+    def test_committed_and_dropped_inputs_start_preview_once(self) -> None:
+        with TemporaryDirectory() as tmp, _app() as app, patch.object(app, "_start_preview_generation") as start:
+            app.parent_var.set(tmp)
+            start.assert_not_called()
+            app._commit_input_entry()
+            app._commit_input_entry()
+            self.assertEqual(start.call_count, 1)
+            app._handle_folder_drop(SimpleNamespace(widget=app.drop_label, data=app.root.tk.call("list", tmp)))
+            self.assertEqual(start.call_count, 2)
+            self.assertEqual(start.call_args.args[1], 0.0)
+
+    def test_loaded_vectors_render_at_zero_or_auto_minimum(self) -> None:
+        geometries = {
+            "polygon": "<Polygon><outerBoundaryIs><LinearRing><coordinates>-97,32 -96.999,32 -96.999,32.001 -97,32.001 -97,32</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+            "line": "<LineString><coordinates>-97,32 -96.999,32</coordinates></LineString>",
+        }
+        for kind, geometry in geometries.items():
+            with self.subTest(kind=kind), TemporaryDirectory() as tmp, _app() as app:
+                source = Path(tmp) / "input.kml"
+                source.write_text(f'<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark>{geometry}</Placemark></kml>')
+                with patch.object(gui_module.threading, "Thread") as worker, patch.object(
+                    gui_module.filedialog, "askopenfilename", return_value=str(source)
+                ):
+                    app._browse_kmz()
+                    self.assertTrue(app._busy)
+                    self.assertEqual(worker.call_args.kwargs["args"][1], 0.0)
+                    worker.return_value.start.assert_called_once()
+                    # Run the captured worker deterministically, then use the real
+                    # result queue and preview drawing path, without a modal dialog.
+                    worker.call_args.kwargs["target"](*worker.call_args.kwargs["args"])
+                with patch.object(gui_module.messagebox, "showerror") as error:
+                    app._drain_queue()
+                    error.assert_not_called()
+                self.assertFalse(app._busy)
+                self.assertEqual(app.preview_state_var.get(), "Preview current")
+                result = app._last_displayed_result
+                self.assertIsNotNone(result)
+                if kind == "polygon":
+                    self.assertEqual(result.metadata.buffer_ft, 0)
+                    self.assertEqual(app.buffer_var.get(), "0")
+                else:
+                    self.assertGreater(result.metadata.buffer_ft, 0)
+                    self.assertEqual(result.metadata.polyline_selected_buffer_ft,
+                                     result.metadata.polyline_minimum_connected_buffer_ft)
+                    self.assertAlmostEqual(float(app.buffer_var.get()), result.metadata.buffer_ft, places=2)
+
+    def test_field_headers_remain_white_when_controls_are_disabled(self) -> None:
+        with _app() as app:
+            for label in (app.overlap_label, app.shape_label_label, app.split_direction_label,
+                          app.outline_mode_label, app.quick_overlap_label):
+                self.assertEqual(label.cget("style"), "Field.TLabel")
+            for state in ((), ("disabled",)):
+                self.assertEqual(app._theme_style.lookup("Field.TLabel", "foreground", state), PALETTE.TEXT)
+                self.assertEqual(app._theme_style.lookup("Field.TLabel", "background", state), PALETTE.SURFACE)
+
     def test_settings_pages_and_custom_angle_follow_selection(self) -> None:
         with _app() as app:
             app._toggle_settings_panel("sections")
