@@ -21,6 +21,7 @@ class VectorInputGeometry:
     source_name: str
     ignored_polygon_count: int = 0
     ignored_interior_ring_count: int = 0
+    geometry_inventory: tuple[str, ...] | None = None
 
 
 def load_vector_input(path: Path) -> VectorInputGeometry:
@@ -34,6 +35,13 @@ def load_vector_input(path: Path) -> VectorInputGeometry:
         raise VectorInputError(f"Input path is not a file: {source_path}")
 
     root = _read_kml_root(source_path)
+    # Inventory before line precedence drops polygons or other spatial objects.
+    spatial_tags = {
+        "LineString", "LinearRing", "Polygon", "Point", "MultiGeometry", "Model",
+        "Track", "MultiTrack", "NetworkLink", "GroundOverlay", "PhotoOverlay", "ScreenOverlay",
+    }
+    inventory = tuple(sorted({_local_name(e.tag) for e in root.iter()
+                              if _local_name(e.tag) in spatial_tags}))
     line_strings = _extract_line_strings(root)
     polygon_elements = [
         element for element in root.iter() if _local_name(element.tag) == "Polygon"
@@ -48,6 +56,7 @@ def load_vector_input(path: Path) -> VectorInputGeometry:
             polygons_wgs84=(),
             source_name=source_path.stem,
             ignored_polygon_count=len(polygon_elements),
+            geometry_inventory=inventory,
         )
 
     if not polygon_elements:
@@ -66,6 +75,7 @@ def load_vector_input(path: Path) -> VectorInputGeometry:
         polygons_wgs84=(polygon,),
         source_name=source_path.stem,
         ignored_interior_ring_count=ignored_interiors,
+        geometry_inventory=inventory,
     )
 
 

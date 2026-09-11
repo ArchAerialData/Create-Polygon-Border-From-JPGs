@@ -1,8 +1,8 @@
 """Monitor-aware sizing for Tk application and child windows.
 
-The process remains in its existing DPI-awareness mode. Win32 work areas,
-Tk geometry requests, and measured outer bounds therefore stay in the same
-virtualized coordinate space.
+Standalone startup enables system DPI awareness before Tk creates any windows.
+Win32 work areas, Tk geometry, and measured outer bounds then use the same
+coordinate space without Windows stretching a 96-DPI bitmap.
 """
 
 from __future__ import annotations
@@ -23,6 +23,47 @@ FRAME_RESERVE_HEIGHT = 64
 DEFAULT_FRAME_RESERVE_WIDTH = FRAME_RESERVE_WIDTH
 DEFAULT_FRAME_RESERVE_HEIGHT = FRAME_RESERVE_HEIGHT
 MAX_MEASURED_FIT_PASSES = 3
+
+
+def enable_windows_dpi_awareness() -> None:
+    """Opt out of bitmap scaling before creating Tk windows.
+
+    Tk 8.6 uses one interpreter-wide font/image scale. System awareness keeps
+    those controls consistent; per-monitor awareness additionally needs live
+    font, image, and layout rebuilding when a window changes monitors.
+    Respect a host's existing DPI mode (Windows rejects changing it), and
+    leave non-Windows platforms alone.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        try:
+            set_context = user32.SetProcessDpiAwarenessContext
+            set_context.argtypes = [ctypes.c_void_p]
+            set_context.restype = wintypes.BOOL
+            if set_context(ctypes.c_void_p(-2)):  # DPI_AWARENESS_CONTEXT_SYSTEM_AWARE
+                return
+            if ctypes.get_last_error() == 5:  # A manifest/host already chose a mode.
+                return
+        except AttributeError:
+            pass
+        try:
+            shcore = ctypes.WinDLL("shcore")
+            set_awareness = shcore.SetProcessDpiAwareness
+            set_awareness.argtypes = [ctypes.c_int]
+            set_awareness.restype = ctypes.c_long
+            result = set_awareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+            if result in (0, -2147024891):  # S_OK or E_ACCESSDENIED (already set)
+                return
+        except (AttributeError, OSError):
+            pass
+        user32.SetProcessDPIAware.argtypes = []
+        user32.SetProcessDPIAware.restype = wintypes.BOOL
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        # Older/restricted hosts keep their existing sizing behavior.
+        pass
 
 HWND = wintypes.HWND
 HMONITOR = wintypes.HANDLE

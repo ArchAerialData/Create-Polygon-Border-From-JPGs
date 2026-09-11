@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import re
+import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -38,6 +40,37 @@ _GEOMETRY_RE = re.compile(
     r"^(?P<width>\d+)x(?P<height>\d+)"
     r"\+(?P<x>-?\d+)\+(?P<y>-?\d+)$"
 )
+
+
+class WindowsDpiStartupTests(TestCase):
+    @skipUnless(sys.platform == "win32", "Windows DPI awareness")
+    def test_fresh_startup_uses_system_dpi_without_bitmap_scaling(self) -> None:
+        # DPI awareness is process-wide and immutable after the first window;
+        # a fresh interpreter verifies actual startup rather than a mocked API.
+        script = r'''
+import ctypes, json, sys
+sys.path.insert(0, "src")
+from jpg_boundary_kmz_gui import _create_root
+from jpg_boundary_gui_window import get_toplevel_hwnd
+r = _create_root()
+r.withdraw()
+r.update_idletasks()
+u = ctypes.WinDLL("user32")
+u.GetWindowDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+u.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+u.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+u.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+h = get_toplevel_hwnd(r)
+print(json.dumps([u.GetAwarenessFromDpiAwarenessContext(u.GetWindowDpiAwarenessContext(h)),
+                  u.GetDpiForWindow(h), u.GetDpiForSystem(), r.winfo_fpixels("1i")]))
+r.destroy()
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, check=True, timeout=30)
+        awareness, window_dpi, system_dpi, tk_dpi = json.loads(result.stdout)
+        self.assertEqual(awareness, 1)
+        self.assertEqual(window_dpi, system_dpi)
+        self.assertAlmostEqual(tk_dpi, window_dpi, delta=1)
 
 
 class _FakeWindow:

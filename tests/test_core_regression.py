@@ -37,6 +37,31 @@ from outline_strategies import OUTLINE_MODE_CONCAVE  # noqa: E402
 
 
 class CoreRegressionTests(TestCase):
+    def test_original_vector_lines_survive_preview_and_export_generation(self) -> None:
+        original = [(-97.0, 32.0), (-96.999, 32.0), (-96.999, 32.001)]
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            kml = '<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><LineString><coordinates>'
+            kml += ' '.join(f'{x},{y}' for x, y in original)
+            kml += '</coordinates></LineString></Placemark></kml>'
+            (folder / "source.kml").write_text(kml)
+            with zipfile.ZipFile(folder / "source.kmz", "w") as archive:
+                archive.writestr("doc.kml", kml)
+            for suffix in ("kml", "kmz"):
+                for profile in (GENERATION_PROFILE_PREVIEW, GENERATION_PROFILE_EXPORT):
+                    with self.subTest(suffix=suffix, profile=profile):
+                        result = generate_boundary_from_input(folder / f"source.{suffix}", 30,
+                                                              generation_profile=profile)
+                        self.assertTrue(result.metadata.vector_simplification_enabled)
+                        self.assertEqual(len(result.source_lines_projected), 1)
+                        source = result.source_lines_projected[0]
+                        self.assertEqual(len(source.coords), len(original))
+                        inverse = Transformer.from_crs(result.metadata.epsg, 4326, always_xy=True)
+                        for projected, expected in zip(source.coords, original):
+                            actual = inverse.transform(*projected)
+                            self.assertAlmostEqual(actual[0], expected[0], places=8)
+                            self.assertAlmostEqual(actual[1], expected[1], places=8)
+
     def test_closed_jpg_loop_preserves_corner_through_preview_and_export(self) -> None:
         perimeter = translate(
             rotate(Polygon([(0, 0), (1200, 0), (1200, 80), (80, 80), (80, 240), (0, 240)]),
@@ -247,45 +272,42 @@ class CoreRegressionTests(TestCase):
             )
             self.assertEqual(len(result.final_polygon_projected.interiors), 0)
 
-    def test_problem_polyline_kml_auto_selects_regular_buffer(self) -> None:
-        kml_path = (
-            ROOT
-            / "test_data"
-            / "new-failures-debugging"
-            / "input-kml"
-            / "photo_polylines_20260702_095008.kml"
-        )
-        self.assertTrue(kml_path.exists())
-
-        for requested_buffer_ft in (0.0, 80.0, 84.0, 85.0):
-            with self.subTest(requested_buffer_ft=requested_buffer_ft):
-                result = generate_boundary_from_input(
-                    kml_path,
-                    buffer_ft=requested_buffer_ft,
-                    generation_profile=GENERATION_PROFILE_PREVIEW,
-                )
-
-                self.assertEqual(result.metadata.input_type, "KML polyline")
-                self.assertAlmostEqual(
-                    result.metadata.polyline_requested_buffer_ft,
-                    requested_buffer_ft,
-                )
-                self.assertGreaterEqual(
-                    result.metadata.buffer_ft,
-                    result.metadata.polyline_minimum_connected_buffer_ft,
-                )
-                self.assertEqual(
-                    result.metadata.buffer_ft,
-                    result.metadata.polyline_selected_buffer_ft,
-                )
-                self.assertLessEqual(
-                    result.metadata.polyline_buffer_regularity_ratio,
-                    result.metadata.polyline_buffer_regularity_target,
-                )
-                self.assertGreater(result.metadata.polyline_buffer_candidate_count, 0)
-                self.assertTrue(result.metadata.polyline_buffer_adjustment_reason)
-                self.assertTrue(result.final_polygon_projected.is_valid)
-                self.assertEqual(len(result.final_polygon_projected.interiors), 0)
+    def test_branched_kmz_preserves_buffer_and_outline_across_splits(self) -> None:
+        to_wgs84 = Transformer.from_crs(32617, 4326, always_xy=True)
+        paths = [
+            [(0, 0), (0, 1000), (200, 2000), (200, 3000), (1000, 3000)],
+            [(200, 2700), (-1400, 2700), (-1400, 2400), (-1600, 2400)],
+            [(150, 1750), (1400, 1750), (1400, 2050)],
+            [(0, 0), (2500, 0), (2500, -300), (3200, -300)],
+        ]
+        body = ""
+        for path in paths:
+            coordinates = " ".join(
+                f"{lon},{lat},0" for lon, lat in
+                (to_wgs84.transform(400000 + x, 3800000 + y) for x, y in path)
+            )
+            body += f"<Placemark><LineString><coordinates>{coordinates}</coordinates></LineString></Placemark>"
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "branches.kmz"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("doc.kml", f'<kml xmlns="http://www.opengis.net/kml/2.2"><Document>{body}</Document></kml>')
+            for buffer_ft in (50, 250, 350):
+                single = generate_boundary_from_input(source, buffer_ft=buffer_ft, generation_profile=GENERATION_PROFILE_PREVIEW)
+                parent = single.final_polygon_projected
+                for count in (1, 3, 4, 8):
+                    with self.subTest(buffer=buffer_ft, sections=count):
+                        result = generate_boundary_from_input(source, buffer_ft=buffer_ft,
+                            section_count=count, overlap_ft=50, shape_label="Branches",
+                            generation_profile=GENERATION_PROFILE_PREVIEW)
+                        self.assertEqual(result.metadata.buffer_ft, buffer_ft)
+                        self.assertTrue(result.final_polygon_projected.equals(parent))
+                        parts = [s.polygon_projected for s in result.sections] or [parent]
+                        self.assertEqual(len(parts), count)
+                        self.assertTrue(all(p.is_valid and p.geom_type == "Polygon" and not p.interiors for p in parts))
+                        combined = unary_union(parts)
+                        self.assertLess(combined.symmetric_difference(parent).area / parent.area, 1e-8)
+                        self.assertTrue(all(combined.buffer(1e-6).covers(line) for line in result.source_lines_projected))
+                        self.assertLess(result.metadata.split_area_variance_pct, 20.0001)
 
     def test_regular_explicit_polyline_buffer_is_not_adjusted(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -299,10 +321,7 @@ class CoreRegressionTests(TestCase):
             self.assertEqual(result.metadata.polyline_requested_buffer_ft, 100.0)
             self.assertEqual(result.metadata.polyline_selected_buffer_ft, 100.0)
             self.assertFalse(result.metadata.polyline_buffer_adjustment_reason)
-            self.assertLessEqual(
-                result.metadata.polyline_buffer_regularity_ratio,
-                result.metadata.polyline_buffer_regularity_target,
-            )
+            self.assertTrue(result.final_polygon_projected.is_valid)
 
     def test_vector_sections_are_simplified_and_export_outer_boundaries(self) -> None:
         with TemporaryDirectory() as tmp:

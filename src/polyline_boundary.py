@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+from shapely import union_all
 from pyproj import CRS, Transformer
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon
 from shapely.ops import transform as transform_geometry
@@ -16,16 +17,12 @@ from geometry_hardening import (
     densify_projected_geometry,
     fill_polygon_interiors,
 )
+from buffer_settings import BufferSettings
 
 
 FEET_PER_METER = 3.280839895
 METERS_PER_FOOT = 0.3048
-POLYLINE_REGULARITY_MAX_PERIMETER_RATIO = 1.55
-POLYLINE_AUTO_BUFFER_MAX_FT = 500
-POLYLINE_AUTO_BUFFER_EXTRA_SEARCH_FT = 200
-POLYLINE_AUTO_BUFFER_FALLBACK_EXTRA_FT = 40
 POLYLINE_AUTO_BUFFER_HARD_MAX_FT = 2000
-POLYLINE_AUTO_BUFFER_MIN_MATERIAL_IMPROVEMENT = 0.10
 
 
 class PolylineBoundaryError(ValueError):
@@ -70,7 +67,7 @@ def build_polyline_boundary(
     lines_wgs84: Sequence[LineString],
     buffer_ft: float,
 ) -> PolylineBoundaryResult:
-    if buffer_ft <= 0:
+    if not math.isfinite(buffer_ft) or buffer_ft <= 0:
         raise PolylineBoundaryError("LineString input requires a buffer greater than 0 ft.")
     if not lines_wgs84:
         raise PolylineBoundaryError("LineString input does not contain any usable lines.")
@@ -89,13 +86,15 @@ def build_polyline_boundary_with_recommended_buffer(
 
     projected_input = _project_linework(lines_wgs84)
     requested_buffer_ft = float(requested_buffer_ft)
-    search_limit_ft = _auto_buffer_search_limit(requested_buffer_ft)
+    if not math.isfinite(requested_buffer_ft) or requested_buffer_ft < 0:
+        raise PolylineBoundaryError("Polyline buffer must be finite and 0 ft or greater.")
+    search_limit_ft = POLYLINE_AUTO_BUFFER_HARD_MAX_FT
     candidates_tested = 0
     candidate_cache: dict[float, _PolylineBufferCandidate | None] = {}
 
     def candidate_for(buffer_ft: float) -> _PolylineBufferCandidate | None:
         nonlocal candidates_tested
-        key = round(float(buffer_ft), 6)
+        key = float(buffer_ft)
         if key not in candidate_cache:
             candidates_tested += 1
             try:
@@ -119,52 +118,21 @@ def build_polyline_boundary_with_recommended_buffer(
             "Polyline buffer could not produce one connected polygon during auto-buffer analysis."
         )
 
-    selected_candidate: _PolylineBufferCandidate | None = None
+    # Concavity is expected in flight corridors. A perimeter/convex-hull ratio
+    # measures shape complexity, not whether a buffer is geometrically usable.
+    # Preserve every valid explicit distance; Auto only resolves connectivity.
+    selected_candidate = requested_candidate or minimum_candidate
     adjustment_reason = ""
-    if requested_candidate is not None and _is_regular_buffer_candidate(requested_candidate):
-        selected_candidate = requested_candidate
-    else:
-        start_ft = minimum_connected_ft
-        if requested_buffer_ft > 0:
-            start_ft = max(start_ft, math.ceil(requested_buffer_ft))
-        selected_candidate = _find_first_regular_buffer_candidate(
-            candidate_for,
-            int(start_ft),
-            int(search_limit_ft),
-        )
-        if selected_candidate is not None:
-            adjustment_reason = _auto_buffer_adjustment_reason(
-                requested_buffer_ft,
-                requested_candidate,
-            )
-
-    if selected_candidate is None:
-        fallback_ft = minimum_connected_ft + POLYLINE_AUTO_BUFFER_FALLBACK_EXTRA_FT
-        fallback_candidate = (
-            candidate_for(float(fallback_ft))
-            if fallback_ft <= POLYLINE_AUTO_BUFFER_HARD_MAX_FT
-            else None
-        )
-        if (
-            fallback_candidate is not None
-            and _materially_improves_regularity(minimum_candidate, fallback_candidate)
-        ):
-            selected_candidate = fallback_candidate
+    if requested_candidate is None:
+        if requested_buffer_ft == 0:
             adjustment_reason = (
-                "No candidate reached the regularity target; using fixed fallback "
-                "above the minimum connected buffer."
+                "LineString input needs positive width; selected the smallest "
+                "connected buffer in whole feet."
             )
         else:
-            best_candidate = _best_connected_candidate(candidate_cache)
-            if best_candidate is None:
-                raise PolylineBoundaryError(
-                    "Polyline buffer could not produce one connected polygon during auto-buffer analysis."
-                )
-            raise PolylineBoundaryError(
-                "Polyline auto-buffer could not find a regular connected boundary. "
-                f"Best tested buffer: {best_candidate.buffer_ft:.0f} ft, "
-                f"regularity ratio {best_candidate.regularity_ratio:.3f} "
-                f"(target <= {POLYLINE_REGULARITY_MAX_PERIMETER_RATIO:.2f})."
+            adjustment_reason = (
+                "Requested buffer produced disconnected geometry; selected the "
+                "smallest connected buffer in whole feet."
             )
 
     diagnostics = {
@@ -172,7 +140,7 @@ def build_polyline_boundary_with_recommended_buffer(
         "minimum_connected_buffer_ft": float(minimum_connected_ft),
         "selected_buffer_ft": float(selected_candidate.buffer_ft),
         "regularity_ratio": float(selected_candidate.regularity_ratio),
-        "regularity_target": float(POLYLINE_REGULARITY_MAX_PERIMETER_RATIO),
+        "regularity_target": 0.0,  # Legacy diagnostic: no shape-complexity gate.
         "candidate_count": int(candidates_tested),
         "adjustment_reason": adjustment_reason,
     }
@@ -181,6 +149,65 @@ def build_polyline_boundary_with_recommended_buffer(
         selected_candidate,
         extra_diagnostics=diagnostics,
     )
+
+
+def build_per_side_polyline_boundary(
+    lines_wgs84: Sequence[LineString], left_ft: float, right_ft: float,
+) -> PolylineBoundaryResult:
+    try:
+        settings = BufferSettings.per_side(left_ft, right_ft)
+    except ValueError as exc:
+        raise PolylineBoundaryError(str(exc)) from exc
+    if not lines_wgs84 or any(
+        line.is_empty or line.is_closed or not line.is_simple or line.length <= 0
+        for line in lines_wgs84
+    ):
+        raise PolylineBoundaryError("Per-side buffers require usable open, simple polylines.")
+    left_ft, right_ft = settings.left_ft, settings.right_ft
+    projected = _project_linework(lines_wgs84)
+    if left_ft == right_ft:
+        # Exact parity with ordinary buffering, without Auto changing the width.
+        candidate = _build_buffer_candidate(projected, left_ft)
+    else:
+        left, right = left_ft * METERS_PER_FOOT, right_ft * METERS_PER_FOOT
+        radius, shift = (left + right) / 2, (left - right) / 2
+        grid = min(1e-6, min(v for v in (left, right) if v > 0) / 10000)
+        pieces = []
+        for line in projected.projected_lines:
+            if left:
+                pieces.append(line.buffer(left, single_sided=True, quad_segs=64))
+            if right:
+                pieces.append(line.buffer(-right, single_sided=True, quad_segs=64))
+            coordinates = np.asarray(line.coords)
+            # Consecutive duplicate vertices must not create a zero-length tangent.
+            nonzero = np.linalg.norm(np.diff(coordinates, axis=0), axis=1) > 0
+            segments = np.diff(coordinates, axis=0)[nonzero]
+            for point, tangent, sign in (
+                (coordinates[0], segments[0], -1),
+                (coordinates[-1], segments[-1], 1),
+            ):
+                tangent = tangent / np.linalg.norm(tangent)
+                normal = np.array([-tangent[1], tangent[0]])
+                arc = [
+                    point + normal * (shift + radius * math.sin(angle))
+                    + sign * tangent * radius * max(0, math.cos(angle))
+                    for angle in np.linspace(-math.pi / 2, math.pi / 2, 129)
+                ]
+                pieces.append(Polygon(arc))
+        buffered = union_all(pieces, grid_size=grid)
+        polygon = _require_single_polygon(
+            fill_polygon_interiors(buffered),
+            "These side buffers produce separate areas. Increase the left or right buffer.",
+        )
+        # Tolerance covers only cap-union rounding, including a zero-width side.
+        if not polygon.buffer(max(2 * grid, 1e-8)).covers(projected.projected_linework):
+            raise PolylineBoundaryError("Per-side buffer did not retain all source linework.")
+        candidate = _PolylineBufferCandidate(
+            radius / METERS_PER_FOOT, polygon, _count_interiors(buffered), _regularity_ratio(polygon),
+        )
+    return _build_result_from_candidate(projected, candidate, extra_diagnostics={
+        "buffer_mode": "per_side", "left_buffer_ft": left_ft, "right_buffer_ft": right_ft,
+    })
 
 
 def _project_linework(lines_wgs84: Sequence[LineString]) -> _ProjectedPolylineInput:
@@ -217,7 +244,7 @@ def _build_buffer_candidate(
     projected_input: _ProjectedPolylineInput,
     buffer_ft: float,
 ) -> _PolylineBufferCandidate:
-    if buffer_ft <= 0:
+    if not math.isfinite(buffer_ft) or buffer_ft <= 0:
         raise PolylineBoundaryError("LineString input requires a buffer greater than 0 ft.")
 
     buffered = buffer_projected_geometry(
@@ -230,6 +257,10 @@ def _build_buffer_candidate(
         "Polyline buffer produced disconnected polygons. Process disconnected areas separately.",
     )
     base_polygon = _require_single_polygon(fill_polygon_interiors(make_valid(base_polygon)))
+    if not base_polygon.is_valid or base_polygon.area <= 0:
+        raise PolylineBoundaryError("Polyline buffer did not produce a valid positive-area polygon.")
+    if not base_polygon.covers(projected_input.projected_linework):
+        raise PolylineBoundaryError("Polyline buffer did not retain all source linework.")
     return _PolylineBufferCandidate(
         buffer_ft=float(buffer_ft),
         polygon_projected=base_polygon,
@@ -279,16 +310,6 @@ def _build_result_from_candidate(
     )
 
 
-def _auto_buffer_search_limit(requested_buffer_ft: float) -> int:
-    requested_limit = math.ceil(max(requested_buffer_ft, 0.0)) + POLYLINE_AUTO_BUFFER_EXTRA_SEARCH_FT
-    return int(
-        min(
-            POLYLINE_AUTO_BUFFER_HARD_MAX_FT,
-            max(POLYLINE_AUTO_BUFFER_MAX_FT, requested_limit),
-        )
-    )
-
-
 def _find_minimum_connected_buffer_ft(
     candidate_for,
     requested_buffer_ft: float,
@@ -320,69 +341,11 @@ def _find_minimum_connected_buffer_ft(
     return low
 
 
-def _find_first_regular_buffer_candidate(
-    candidate_for,
-    start_ft: int,
-    search_limit_ft: int,
-) -> _PolylineBufferCandidate | None:
-    if start_ft > search_limit_ft:
-        return None
-
-    upper_candidate = candidate_for(float(search_limit_ft))
-    if upper_candidate is None or not _is_regular_buffer_candidate(upper_candidate):
-        return None
-
-    low = start_ft
-    high = search_limit_ft
-    selected_candidate = upper_candidate
-    while low <= high:
-        mid = (low + high) // 2
-        candidate = candidate_for(float(mid))
-        if candidate is not None and _is_regular_buffer_candidate(candidate):
-            selected_candidate = candidate
-            high = mid - 1
-        else:
-            low = mid + 1
-    return selected_candidate
-
-
 def _regularity_ratio(polygon: Polygon) -> float:
     hull_length = float(polygon.convex_hull.length)
     if hull_length <= 0:
         return math.inf
     return float(polygon.exterior.length) / hull_length
-
-
-def _is_regular_buffer_candidate(candidate: _PolylineBufferCandidate) -> bool:
-    return candidate.regularity_ratio <= POLYLINE_REGULARITY_MAX_PERIMETER_RATIO
-
-
-def _auto_buffer_adjustment_reason(
-    requested_buffer_ft: float,
-    requested_candidate: _PolylineBufferCandidate | None,
-) -> str:
-    if requested_buffer_ft <= 0:
-        return "Requested buffer was zero; auto-selected a connected regular buffer."
-    if requested_candidate is None:
-        return "Requested buffer produced disconnected geometry; auto-selected a connected regular buffer."
-    return "Requested buffer was connected but too irregular; auto-selected a larger regular buffer."
-
-
-def _materially_improves_regularity(
-    baseline: _PolylineBufferCandidate,
-    candidate: _PolylineBufferCandidate,
-) -> bool:
-    improvement = baseline.regularity_ratio - candidate.regularity_ratio
-    return improvement >= baseline.regularity_ratio * POLYLINE_AUTO_BUFFER_MIN_MATERIAL_IMPROVEMENT
-
-
-def _best_connected_candidate(
-    candidate_cache: dict[float, _PolylineBufferCandidate | None],
-) -> _PolylineBufferCandidate | None:
-    candidates = [candidate for candidate in candidate_cache.values() if candidate is not None]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda candidate: candidate.regularity_ratio)
 
 
 def _collect_line_coordinates(lines: Sequence[LineString]) -> tuple[np.ndarray, np.ndarray]:

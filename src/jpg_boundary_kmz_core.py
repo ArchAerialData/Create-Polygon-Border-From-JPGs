@@ -18,11 +18,13 @@ from pyproj import CRS, Transformer
 from scipy.spatial import cKDTree
 from shapely.affinity import rotate
 from shapely.geometry import box
-from shapely.geometry import GeometryCollection, MultiPoint, MultiPolygon, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiPoint, MultiPolygon, Polygon
 from shapely.ops import transform as transform_geometry
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
+from buffer_settings import BufferSettings
+from polyline_compatibility import classify_per_side_input
 from camera_preflight import analyze_camera_preflight
 from geometry_hardening import (
     DEFAULT_BUFFER_QUAD_SEGS,
@@ -45,6 +47,7 @@ from outline_strategies import (
 from polyline_boundary import (
     PolylineBoundaryError,
     build_polyline_boundary_with_recommended_buffer,
+    build_per_side_polyline_boundary,
 )
 from section_ordering import order_parts_for_human_view
 
@@ -87,7 +90,7 @@ class BoundaryMetadata:
     skipped_count: int
     epsg: int
     crs_name: str
-    buffer_ft: float
+    buffer_ft: float | None
     median_spacing_ft: float
     smoothing_ft: float
     containment_padding_ft: float
@@ -132,6 +135,9 @@ class BoundaryMetadata:
     polyline_buffer_candidate_count: int = 0
     polyline_buffer_adjustment_reason: str = ""
     generation_profile: str = GENERATION_PROFILE_EXPORT
+    buffer_mode: str = "unified"
+    left_buffer_ft: float | None = None
+    right_buffer_ft: float | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,7 @@ class BoundaryResult:
     final_polygon_projected: Polygon
     final_polygon_wgs84: Polygon
     sections: list[BoundarySection]
+    source_lines_projected: tuple[LineString, ...] = ()
 
 
 def find_jpgs(parent_folder: Path) -> list[Path]:
@@ -362,9 +369,15 @@ def generate_boundary_from_input(
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
     simplify_vector_output: bool = True,
+    *,
+    buffer_settings: BufferSettings | None = None,
 ) -> BoundaryResult:
+    if buffer_settings is not None and buffer_settings.mode == "unified":
+        buffer_ft = buffer_settings.unified_ft
     input_path = Path(input_path)
     if input_path.is_dir():
+        if buffer_settings is not None and buffer_settings.mode == "per_side":
+            raise BoundaryError("Per-side buffers require a polyline-only KMZ.")
         return generate_boundary(
             input_path,
             buffer_ft,
@@ -385,6 +398,7 @@ def generate_boundary_from_input(
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
             simplify_vector_output=simplify_vector_output,
+            buffer_settings=buffer_settings,
         )
     if input_path.is_file() and input_path.suffix.lower() == ".kml":
         return generate_boundary_from_vector_file(
@@ -396,6 +410,7 @@ def generate_boundary_from_input(
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
             simplify_vector_output=simplify_vector_output,
+            buffer_settings=buffer_settings,
         )
     raise BoundaryError("Choose a folder of JPGs, KML file, or KMZ file.")
 
@@ -409,6 +424,8 @@ def generate_boundary_from_kmz(
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
     simplify_vector_output: bool = True,
+    *,
+    buffer_settings: BufferSettings | None = None,
 ) -> BoundaryResult:
     kmz_path = Path(kmz_path)
     if kmz_path.suffix.lower() != ".kmz":
@@ -422,6 +439,7 @@ def generate_boundary_from_kmz(
         split_direction_deg=split_direction_deg,
         generation_profile=generation_profile,
         simplify_vector_output=simplify_vector_output,
+        buffer_settings=buffer_settings,
     )
 
 
@@ -434,7 +452,43 @@ def generate_boundary_from_vector_file(
     split_direction_deg: float | None = None,
     generation_profile: str = GENERATION_PROFILE_EXPORT,
     simplify_vector_output: bool = True,
+    *,
+    buffer_settings: BufferSettings | None = None,
 ) -> BoundaryResult:
+    try:
+        vector_geometry = load_vector_input(Path(vector_path))
+    except VectorInputError as exc:
+        raise BoundaryError(str(exc)) from exc
+    return generate_boundary_from_vector_geometry(
+        vector_geometry, buffer_ft, section_count, overlap_ft, shape_label,
+        split_direction_deg, generation_profile, simplify_vector_output,
+        buffer_settings=buffer_settings,
+    )
+
+
+def generate_boundary_from_vector_geometry(
+    vector_geometry: VectorInputGeometry,
+    buffer_ft: float,
+    section_count: int = 1,
+    overlap_ft: float = 50.0,
+    shape_label: str = "",
+    split_direction_deg: float | None = None,
+    generation_profile: str = GENERATION_PROFILE_EXPORT,
+    simplify_vector_output: bool = True,
+    *,
+    buffer_settings: BufferSettings | None = None,
+) -> BoundaryResult:
+    try:
+        settings = buffer_settings or BufferSettings(unified_ft=buffer_ft)
+    except ValueError as exc:
+        raise BoundaryError(str(exc)) from exc
+    if settings.mode == "per_side":
+        compatibility = classify_per_side_input(vector_geometry)
+        if not compatibility.eligible:
+            raise BoundaryError(compatibility.explanation)
+        buffer_ft = 0.0  # Legacy scalar is inactive in this mode.
+    else:
+        buffer_ft = settings.unified_ft
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
     if section_count < 1 or section_count > MAX_SECTION_COUNT:
@@ -442,12 +496,6 @@ def generate_boundary_from_vector_file(
     if overlap_ft < 0:
         raise BoundaryError("Overlap distance must be 0 or greater.")
     generation_profile = _validate_generation_profile(generation_profile)
-
-    vector_path = Path(vector_path)
-    try:
-        vector_geometry = load_vector_input(vector_path)
-    except VectorInputError as exc:
-        raise BoundaryError(str(exc)) from exc
 
     if vector_geometry.lines_wgs84:
         return _generate_boundary_from_polyline_vector(
@@ -459,6 +507,7 @@ def generate_boundary_from_vector_file(
             split_direction_deg=split_direction_deg,
             generation_profile=generation_profile,
             simplify_vector_output=simplify_vector_output,
+            buffer_settings=settings,
         )
     return _generate_boundary_from_polygon_vector(
         vector_geometry,
@@ -633,16 +682,23 @@ def _generate_boundary_from_polyline_vector(
     split_direction_deg: float | None,
     generation_profile: str,
     simplify_vector_output: bool,
+    buffer_settings: BufferSettings | None = None,
 ) -> BoundaryResult:
+    per_side = buffer_settings is not None and buffer_settings.mode == "per_side"
     try:
-        line_boundary = build_polyline_boundary_with_recommended_buffer(
-            vector_geometry.lines_wgs84,
-            buffer_ft,
-        )
+        if per_side:
+            line_boundary = build_per_side_polyline_boundary(
+                vector_geometry.lines_wgs84, buffer_settings.left_ft, buffer_settings.right_ft,
+            )
+        else:
+            line_boundary = build_polyline_boundary_with_recommended_buffer(
+                vector_geometry.lines_wgs84, buffer_ft,
+            )
     except PolylineBoundaryError as exc:
         raise BoundaryError(str(exc)) from exc
 
     effective_buffer_ft = float(line_boundary.diagnostics.get("buffer_ft", buffer_ft))
+    to_projected = Transformer.from_crs(4326, line_boundary.epsg, always_xy=True)
     final_projected = _require_single_exterior_polygon(
         fill_polygon_interiors(line_boundary.final_polygon_projected),
         "Polyline buffer did not produce one exterior-only polygon.",
@@ -653,6 +709,9 @@ def _generate_boundary_from_polyline_vector(
         always_xy=True,
     )
 
+    source_lines = tuple(transform_geometry(to_projected.transform, line)
+                         for line in vector_geometry.lines_wgs84)
+    source_union = unary_union(source_lines)
     sections: list[BoundarySection] = []
     split_strategy = "Single polygon"
     section_area_min_acres = 0.0
@@ -680,10 +739,11 @@ def _generate_boundary_from_polyline_vector(
             densify_sections=False,
         )
         if export_quality:
-            sections, simplification_stats = _simplify_vector_sections(
-                sections,
-                to_wgs84,
-            )
+            original_sections = sections
+            sections, simplification_stats = _simplify_vector_sections(sections, to_wgs84)
+            if per_side and not unary_union([s.polygon_projected for s in sections]).buffer(2e-6).covers(source_union):
+                sections = original_sections
+                simplification_stats = _unsimplified_vector_section_stats(sections)
         else:
             simplification_stats = _unsimplified_vector_section_stats(sections)
         base_areas = [section.base_area_acres for section in sections]
@@ -695,9 +755,12 @@ def _generate_boundary_from_polyline_vector(
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     else:
         if export_quality:
-            final_projected, simplification_stats = _simplify_vector_output_polygon(
-                final_projected
-            )
+            original = final_projected
+            final_projected, simplification_stats = _simplify_vector_output_polygon(original)
+            if per_side and not final_projected.buffer(2e-6).covers(source_union):
+                final_projected = original
+                count = _polygon_vertex_count(original)
+                simplification_stats = VectorSimplificationStats(count, count)
         final_wgs84 = _project_polygon_to_wgs84(final_projected, to_wgs84)
     projected_points = np.array(final_projected.exterior.coords[:-1], dtype=float)
 
@@ -712,7 +775,10 @@ def _generate_boundary_from_polyline_vector(
         skipped_count=0,
         epsg=line_boundary.epsg,
         crs_name=line_boundary.crs_name,
-        buffer_ft=effective_buffer_ft,
+        buffer_ft=None if per_side else effective_buffer_ft,
+        buffer_mode="per_side" if per_side else "unified",
+        left_buffer_ft=buffer_settings.left_ft if per_side else None,
+        right_buffer_ft=buffer_settings.right_ft if per_side else None,
         median_spacing_ft=0.0,
         smoothing_ft=0.0,
         containment_padding_ft=0.0,
@@ -781,6 +847,7 @@ def _generate_boundary_from_polyline_vector(
         final_polygon_projected=final_projected,
         final_polygon_wgs84=final_wgs84,
         sections=sections,
+        source_lines_projected=source_lines,
     )
 
 
@@ -890,7 +957,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
     lines.extend(
         [
             f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
-            f"Buffer distance: {metadata.buffer_ft:,.1f} ft",
+            "Buffer distance: " + buffer_settings_from_metadata(metadata).description,
             f"Output polygon vertices: {metadata.vertex_count:,}",
         ]
     )
@@ -1027,7 +1094,7 @@ def _build_recursive_connected_sections(
         area_max_acres=max(base_area_acres),
         area_average_acres=average_area_acres,
         area_variance_pct=area_variance_pct,
-        split_strategy=_format_split_strategy(split_angles),
+        split_strategy=_format_split_strategy(split_angles, area_variance_pct=area_variance_pct),
     )
     return sections, diagnostics
 
@@ -1295,72 +1362,100 @@ def _partition_connected_polygon(
     polygon: Polygon,
     target_count: int,
 ) -> tuple[list[Polygon], list[float]]:
-    if target_count == 1:
-        return [polygon], []
+    # Prefer exact areas, then allow the same 20% variance as natural sections.
+    # Keep every leaf within the ORIGINAL target area, avoiding cumulative drift
+    # through recursive cuts. Work limits bound backtracking on complex networks.
+    target_area = polygon.area / target_count
+    remaining_attempts = 0
+    allow_imbalance = False
 
-    left_count = target_count // 2
-    right_count = target_count - left_count
-    cut = _find_connected_cut(polygon, left_count / target_count)
-    if cut is None:
-        raise BoundaryError(
-            "Could not split the outline into the requested number of connected "
-            "sections. Try fewer shapes."
-        )
+    def partition(part: Polygon, count: int) -> tuple[list[Polygon], list[float]] | None:
+        nonlocal remaining_attempts
+        if count == 1:
+            if abs(part.area / target_area - 1.0) <= 0.20 + 1e-6:
+                return [part], []
+            return None
+        if remaining_attempts <= 0:
+            return None
+        remaining_attempts -= 1
+        balanced = count // 2
+        allocations = list(dict.fromkeys((balanced, count - balanced, 1, count - 1)))
+        for left_count in allocations:
+            fraction = left_count / count
+            factors = (1.0, 0.95, 1.05, 0.9, 1.1, 0.8, 1.2) if allow_imbalance else (1.0,)
+            for factor in factors:
+                left_fraction = fraction * factor
+                left_area = part.area * left_fraction
+                right_area = part.area - left_area
+                if not (
+                    0.8 - 1e-6 <= left_area / (left_count * target_area) <= 1.2 + 1e-6
+                    and 0.8 - 1e-6 <= right_area / ((count - left_count) * target_area) <= 1.2 + 1e-6
+                ):
+                    continue
+                for left, right, angle in _connected_cut_candidates(part, left_fraction):
+                    if remaining_attempts <= 0:
+                        return None
+                    remaining_attempts -= 1
+                    left_result = partition(left, left_count)
+                    if left_result is None:
+                        continue
+                    right_result = partition(right, count - left_count)
+                    if right_result is not None:
+                        return (
+                            left_result[0] + right_result[0],
+                            [angle] + left_result[1] + right_result[1],
+                        )
+        return None
 
-    left_polygon, right_polygon, angle = cut
-    left_parts, left_angles = _partition_connected_polygon(left_polygon, left_count)
-    right_parts, right_angles = _partition_connected_polygon(right_polygon, right_count)
-    return left_parts + right_parts, [angle] + left_angles + right_angles
+    for allow_imbalance in (False, True):
+        remaining_attempts = max(32, min(512, target_count * 8))
+        result = partition(polygon, target_count)
+        if result is not None:
+            return result
+    raise BoundaryError(
+        "Could not split the outline into the requested number of connected "
+        "sections within the Auto search limit. Try fewer shapes or a custom direction."
+    )
 
 
-def _find_connected_cut(
-    polygon: Polygon,
-    left_fraction: float,
-) -> tuple[Polygon, Polygon, float] | None:
+def _connected_cut_candidates(
+    polygon: Polygon, left_fraction: float,
+) -> Iterable[tuple[Polygon, Polygon, float]]:
     coords = np.array(polygon.exterior.coords[:-1])
     center = tuple(coords.mean(axis=0))
-    best: tuple[float, int, int, float, Polygon, Polygon] | None = None
-
-    for priority, angle in enumerate(_candidate_split_angles(polygon)):
-        rotated = rotate(polygon, -angle, origin=center, use_radians=False)
-        minx, miny, maxx, maxy = rotated.bounds
-        margin = max(maxx - minx, maxy - miny) * 2.0
-        target_area = rotated.area * left_fraction
-        cut_x = _find_equal_area_x(
-            rotated,
-            minx - margin,
-            maxx + margin,
-            miny - margin,
-            maxy + margin,
-            target_area,
-        )
-        left_rotated = _strict_single_polygon(
-            rotated.intersection(box(minx - margin, miny - margin, cut_x, maxy + margin))
-        )
-        right_rotated = _strict_single_polygon(
-            rotated.intersection(box(cut_x, miny - margin, maxx + margin, maxy + margin))
-        )
-        if left_rotated is None or right_rotated is None:
-            continue
-
-        left_polygon = _strict_single_polygon(
-            rotate(left_rotated, angle, origin=center, use_radians=False)
-        )
-        right_polygon = _strict_single_polygon(
-            rotate(right_rotated, angle, origin=center, use_radians=False)
-        )
-        if left_polygon is None or right_polygon is None:
-            continue
-
-        area_error = abs((left_polygon.area / polygon.area) - left_fraction)
-        vertex_count = len(left_polygon.exterior.coords) + len(right_polygon.exterior.coords)
-        candidate = (area_error, vertex_count, priority, angle, left_polygon, right_polygon)
-        if best is None or candidate[:3] < best[:3]:
-            best = candidate
-
-    if best is None:
-        return None
-    return best[4], best[5], best[3]
+    primary_angles = _candidate_split_angles(polygon)
+    # Search finer directions only if the primary cuts cannot finish a partition.
+    fine_angles = [
+        float(angle) for angle in range(0, 180, 5)
+        if all(abs(angle - existing) > 1e-6 for existing in primary_angles)
+    ]
+    for angles in (primary_angles, fine_angles):
+        candidates = []
+        for priority, angle in enumerate(angles):
+            rotated = rotate(polygon, -angle, origin=center, use_radians=False)
+            minx, miny, maxx, maxy = rotated.bounds
+            margin = max(maxx - minx, maxy - miny) * 2.0
+            cut_x = _find_equal_area_x(
+                rotated, minx - margin, maxx + margin,
+                miny - margin, maxy + margin, rotated.area * left_fraction,
+            )
+            left_rotated = _strict_single_polygon(
+                rotated.intersection(box(minx - margin, miny - margin, cut_x, maxy + margin))
+            )
+            right_rotated = _strict_single_polygon(
+                rotated.intersection(box(cut_x, miny - margin, maxx + margin, maxy + margin))
+            )
+            if left_rotated is None or right_rotated is None:
+                continue
+            left = _strict_single_polygon(rotate(left_rotated, angle, origin=center))
+            right = _strict_single_polygon(rotate(right_rotated, angle, origin=center))
+            if left is None or right is None:
+                continue
+            area_error = abs(left.area / polygon.area - left_fraction)
+            vertex_count = len(left.exterior.coords) + len(right.exterior.coords)
+            candidates.append((area_error, vertex_count, priority, angle, left, right))
+        for candidate in sorted(candidates, key=lambda item: item[:3]):
+            yield candidate[4], candidate[5], candidate[3]
 
 
 def _candidate_split_angles(polygon: Polygon) -> list[float]:
@@ -1427,12 +1522,13 @@ def _strict_single_polygon(geometry, min_area: float = 1e-6) -> Polygon | None:
     return None
 
 
-def _format_split_strategy(split_angles: list[float]) -> str:
+def _format_split_strategy(split_angles: list[float], *, area_variance_pct: float = 0.0) -> str:
     if not split_angles:
         return "Single polygon"
     rounded = [f"{angle:.1f} deg" for angle in split_angles[:6]]
     suffix = "" if len(split_angles) <= 6 else f", +{len(split_angles) - 6} more"
-    return f"Auto connected equal-area ({len(split_angles)} cuts: {', '.join(rounded)}{suffix})"
+    area_mode = "balanced-area" if area_variance_pct > 0.01 else "equal-area"
+    return f"Auto connected {area_mode} ({len(split_angles)} cuts: {', '.join(rounded)}{suffix})"
 
 
 def _polygon_to_kml_coords(polygon: Polygon) -> list[tuple[float, float, int]]:
@@ -1508,6 +1604,12 @@ def _format_vector_simplification_lines(metadata: BoundaryMetadata) -> list[str]
     ]
 
 
+def buffer_settings_from_metadata(metadata: BoundaryMetadata) -> BufferSettings:
+    if metadata.buffer_mode == "per_side":
+        return BufferSettings.per_side(metadata.left_buffer_ft, metadata.right_buffer_ft)
+    return BufferSettings(unified_ft=metadata.buffer_ft)
+
+
 def _format_polyline_auto_buffer_lines(metadata: BoundaryMetadata) -> list[str]:
     if not metadata.source_line_count or metadata.polyline_buffer_candidate_count <= 0:
         return []
@@ -1515,7 +1617,7 @@ def _format_polyline_auto_buffer_lines(metadata: BoundaryMetadata) -> list[str]:
     lines = [
         f"Requested polyline buffer: {metadata.polyline_requested_buffer_ft:,.1f} ft",
         (
-            "Minimum connected polyline buffer: "
+            "Minimum connected whole-foot buffer: "
             f"{metadata.polyline_minimum_connected_buffer_ft:,.1f} ft"
         ),
         f"Selected polyline buffer: {metadata.polyline_selected_buffer_ft:,.1f} ft",
@@ -1817,7 +1919,7 @@ def _build_kml_description(
         f"Input type: {metadata.input_type}",
         f"Source input: {metadata.source_folder}",
         f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
-        f"Buffer distance: {metadata.buffer_ft:,.1f} ft",
+        "Buffer distance: " + buffer_settings_from_metadata(metadata).description,
         f"Output polygon vertices: {metadata.vertex_count:,}",
     ]
     if metadata.input_type == "JPG folder":

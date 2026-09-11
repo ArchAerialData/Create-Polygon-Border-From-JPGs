@@ -111,6 +111,8 @@ def apply_gui_theme(root: tk.Misc) -> ttk.Style:
     _configure_scrollbar_and_progress_styles(style)
     install_rounded_button_elements(style, root)
     _install_rounded_field_elements(style, root)
+    for kind in ("Entry", "Spinbox"):
+        style.configure(f"Compact.App.T{kind}", padding=(6, 3))
     _install_checkbox_elements(style, root)
     return style
 

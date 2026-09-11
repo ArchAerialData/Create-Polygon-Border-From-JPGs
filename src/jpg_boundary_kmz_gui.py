@@ -18,6 +18,10 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from buffer_settings import BufferSettings, seed_side_fields
+from kml_vector_input import load_vector_input
+from polyline_compatibility import PolylineCompatibility, classify_per_side_input, source_identity
+
 from jpg_boundary_gui_basemap import (
     MAX_OUTPUT_DIMENSION,
     MAX_OUTPUT_PIXELS,
@@ -41,6 +45,7 @@ from jpg_boundary_gui_theme import (
     style_tk_text,
 )
 from jpg_boundary_gui_window import (
+    enable_windows_dpi_awareness,
     WindowFitResult,
     apply_initial_geometry,
     clamp_child_geometry,
@@ -64,6 +69,8 @@ from jpg_boundary_kmz_core import (
     MAX_SECTION_COUNT,
     format_summary,
     generate_boundary_from_input,
+    generate_boundary_from_vector_geometry,
+    buffer_settings_from_metadata,
     save_kmz,
 )
 from outline_strategies import (
@@ -128,6 +135,25 @@ class _PreviewMapSurface:
     last_applied_signature: tuple[object, ...] | None
 
 
+_BufferValue = float | BufferSettings
+_SettingsKey = tuple[str, float | tuple[str, float | None, float | None], int, float, str, str, str, str, str]
+
+
+@dataclass(frozen=True)
+class _GeometryRequest:
+    request_id: int
+    input_generation: int
+    input_path: Path
+    identity: tuple[str, int, int] | None
+    buffer: BufferSettings
+
+
+@dataclass(frozen=True)
+class _WorkerMessage:
+    request: _GeometryRequest
+    payload: object
+
+
 class BoundaryKmzApp:
     def __init__(
         self,
@@ -143,6 +169,17 @@ class BoundaryKmzApp:
         default_output_path = self._default_output_path()
         self.parent_var = tk.StringVar()
         self.buffer_var = tk.StringVar(value="0")
+        self.per_side_var = tk.BooleanVar(value=False)
+        self.left_buffer_var = tk.StringVar(value="")
+        self.right_buffer_var = tk.StringVar(value="")
+        self._updating_buffer_mode = False
+        self._compatibility: PolylineCompatibility | None = None
+        self._compatibility_identity = None
+        self._input_generation = 0
+        self._request_sequence = 0
+        self._active_request: _GeometryRequest | None = None
+        self._cached_source_identity = None
+        self._buffer_layout_after_id = None
         self.output_name_var = tk.StringVar(value=default_output_path.stem)
         self.output_var = tk.StringVar(value=str(default_output_path))
         self.outline_mode_var = tk.StringVar(value="Auto")
@@ -151,7 +188,7 @@ class BoundaryKmzApp:
         self.shape_label_var = tk.StringVar(value=self._default_shape_label())
         self.split_direction_var = tk.StringVar(value="Auto")
         self.split_direction_degrees_var = tk.StringVar(value="")
-        self.simplify_vector_var = tk.BooleanVar(value=False)
+        self.simplify_vector_var = tk.BooleanVar(value=True)
         self.world_imagery_var = tk.BooleanVar(value=True)
         self.imagery_status_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
@@ -164,9 +201,7 @@ class BoundaryKmzApp:
 
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cached_result: BoundaryResult | None = None
-        self._cached_settings: (
-            tuple[str, float, int, float, str, str, str, str, str] | None
-        ) = None
+        self._cached_settings: _SettingsKey | None = None
         self._last_displayed_result: BoundaryResult | None = None
         self._last_displayed_signature: tuple[str, ...] | None = None
         self._preview_stale = False
@@ -271,6 +306,8 @@ class BoundaryKmzApp:
         self.split_direction_degrees_var.trace_add("write", self._on_split_direction_changed)
         self.simplify_vector_var.trace_add("write", self._on_vector_simplification_changed)
         self.buffer_var.trace_add("write", self._on_buffer_changed)
+        self.left_buffer_var.trace_add("write", self._on_side_buffer_changed)
+        self.right_buffer_var.trace_add("write", self._on_side_buffer_changed)
         self.world_imagery_var.trace_add("write", self._on_world_imagery_toggled)
         self._update_outline_mode_state()
         self._update_section_control_state()
@@ -300,7 +337,7 @@ class BoundaryKmzApp:
         self.header_frame = ttk.Frame(
             parent, style="Card.TFrame",
         )
-        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.header_frame.columnconfigure(0, weight=1)
         self.brand_frame = ttk.Frame(self.header_frame, style="Brand.TFrame", padding=(18, 12))
         self.brand_frame.grid(row=0, column=0, sticky="ew")
@@ -1106,19 +1143,15 @@ class BoundaryKmzApp:
             padding=(28, 24),
         )
         self.empty_input_overlay.columnconfigure((0, 1), weight=1)
-        self.empty_caption_label = ttk.Label(
-            self.empty_input_overlay, text="YOUR NEXT BOUNDARY STARTS HERE", style="Eyebrow.TLabel",
-        )
-        self.empty_caption_label.grid(row=0, column=0, columnspan=2, pady=(0, 5))
         self.empty_title_label = ttk.Label(
             self.empty_input_overlay,
-            text="From flight to finished outline",
+            text="Select input",
             style="Hero.TLabel",
         )
         self.empty_title_label.grid(row=1, column=0, columnspan=2, pady=(0, 12))
 
         drop_text = (
-            "Drop a JPG folder or KML / KMZ here\nGeotagged photos, polygons, and flight paths"
+            "Drop a JPG folder or KML / KMZ file here."
             if DND_FILES is not None
             else "Drag-and-drop unavailable — browse below"
         )
@@ -1158,7 +1191,7 @@ class BoundaryKmzApp:
         self.browse_vector_button.grid(row=3, column=1, sticky="ew", padx=(5, 0))
         self.empty_hint_label = ttk.Label(
             self.empty_input_overlay,
-            text="Choose input  →  Adjust boundary  →  Preview & export",
+            text="Preview loads automatically.",
             style="Secondary.TLabel", justify="center", anchor="center",
         )
         self.empty_hint_label.grid(row=4, column=0, columnspan=2, pady=(16, 0), sticky="ew")
@@ -1260,6 +1293,12 @@ class BoundaryKmzApp:
             ToolTip(self.output_settings_button, "Name your KMZ and choose where to save it."),
             ToolTip(self.scan_button, "Build or refresh the preview · F5 or Ctrl+Enter"),
             ToolTip(self.export_button, "Generate and save the KMZ using the current settings · Ctrl+E"),
+            ToolTip(self.per_side_checkbutton, "Copy the current buffer to each side; 0 starts at 200 ft per side. Left/right follows the source arrows."),
+            ToolTip(self.quick_per_side_checkbutton, "Copy the current buffer to each side; 0 starts at 200 ft per side. Left/right follows the source arrows."),
+            ToolTip(self.left_buffer_entry, "Distance to the left when following each source line's direction arrows."),
+            ToolTip(self.right_buffer_entry, "Distance to the right when following each source line's direction arrows."),
+            ToolTip(self.quick_left_buffer_entry, "Left of each source direction arrow, in feet."),
+            ToolTip(self.quick_right_buffer_entry, "Right of each source direction arrow, in feet."),
             ToolTip(self.quick_buffer_entry, "Added boundary buffer in feet. Use 0 for no added JPG or polygon buffer."),
             ToolTip(self.quick_section_count_spinbox, "Split the boundary into this many connected shapes."),
             ToolTip(self.outline_mode_combo, "Auto selects a suitable outline from the ordered camera positions."),
@@ -1396,8 +1435,26 @@ class BoundaryKmzApp:
         self.drawer_browse_vector_button = ttk.Button(
             input_buttons, text="KML / KMZ…", style="Secondary.TButton", command=self._browse_kmz)
         self.drawer_browse_vector_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        self.buffer_entry = ttk.Entry(parent, textvariable=self.buffer_var, style="App.TEntry")
-        self._settings_field(parent, 3, "Boundary buffer · feet", self.buffer_entry)
+        buffer_slot = ttk.Frame(parent, style="Card.TFrame")
+        buffer_slot.grid(row=3, column=0, rowspan=2, sticky="ew")
+        buffer_slot.columnconfigure((0, 1), weight=1, uniform="buffer")
+        self.per_side_checkbutton = ttk.Checkbutton(
+            buffer_slot, text="Per-side buffer", variable=self.per_side_var,
+            command=lambda: self._toggle_per_side("drawer"), style="Surface.TCheckbutton")
+        self._drawer_unified_group = ttk.Frame(buffer_slot, style="Card.TFrame")
+        self._drawer_unified_group.columnconfigure(0, weight=1)
+        self.buffer_entry = ttk.Entry(self._drawer_unified_group, textvariable=self.buffer_var, style="App.TEntry")
+        self._settings_field(self._drawer_unified_group, 0, "Boundary buffer (ft)", self.buffer_entry)
+        self._drawer_side_groups = []
+        for label, variable in (("Left (ft)", self.left_buffer_var), ("Right (ft)", self.right_buffer_var)):
+            group = ttk.Frame(buffer_slot, style="Card.TFrame")
+            group.columnconfigure(0, weight=1)
+            entry = ttk.Entry(group, textvariable=variable, width=9, style="App.TEntry")
+            self._settings_field(group, 0, label, entry)
+            self._drawer_side_groups.append((group, entry))
+        self.left_buffer_entry = self._drawer_side_groups[0][1]
+        self.right_buffer_entry = self._drawer_side_groups[1][1]
+        self._refresh_buffer_controls()
         self.outline_mode_combo = ttk.Combobox(
             parent, textvariable=self.outline_mode_var, values=list(OUTLINE_MODE_LABELS.keys()),
             state="readonly", style="App.TCombobox")
@@ -1487,7 +1544,7 @@ class BoundaryKmzApp:
         self.action_bar = ttk.Frame(
             parent,
             style="ActionBar.TFrame",
-            padding=(10, 8),
+            padding=(10, 4),
         )
         self.action_bar.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         self.action_bar.columnconfigure(0, weight=1)
@@ -1510,47 +1567,45 @@ class BoundaryKmzApp:
         self.status_label.grid(row=0, column=1, columnspan=7, sticky="ew", padx=(0, 10))
         self.action_left_group.columnconfigure(1, weight=1)
 
-        self.quick_controls = ttk.Frame(self.action_left_group, style="ActionBar.TFrame")
-        self.quick_controls.grid(row=1, column=0, columnspan=8, sticky="w", pady=(10, 0))
-        ttk.Label(
-            self.quick_controls,
-            text="Buffer (ft)",
-            style="Field.TLabel",
-        ).grid(row=0, column=0, padx=(0, 6), pady=0, sticky="w")
-        self.quick_buffer_entry = ttk.Entry(
-            self.quick_controls,
-            textvariable=self.buffer_var,
-            width=8,
-            style="App.TEntry",
-        )
-        self.quick_buffer_entry.grid(row=0, column=1, padx=(0, 16), pady=0, sticky="w")
-        ttk.Label(
-            self.quick_controls,
-            text="Shapes",
-            style="Field.TLabel",
-        ).grid(row=0, column=2, padx=(0, 6), pady=0)
+        self.quick_controls = ttk.Frame(self.action_bar, style="ActionBar.TFrame")
+        self._quick_field_groups = []
+
+        def quick_field(text):
+            group = ttk.Frame(self.quick_controls, style="ActionBar.TFrame")
+            label = ttk.Label(group, text=text, style="Field.TLabel")
+            label.grid(row=0, column=0, padx=(0, 6), sticky="w")
+            self._quick_field_groups.append(group)
+            return group, label
+
+        self._quick_mode_group = ttk.Frame(self.quick_controls, style="ActionBar.TFrame")
+        self._quick_field_groups.append(self._quick_mode_group)
+        self.quick_per_side_checkbutton = ttk.Checkbutton(
+            self._quick_mode_group, text="Per-side", variable=self.per_side_var,
+            command=lambda: self._toggle_per_side("footer"), style="Surface.TCheckbutton")
+        self.quick_per_side_checkbutton.grid(row=0, column=0)
+        group, _ = quick_field("Buffer (ft)")
+        self._quick_unified_group = group
+        self.quick_buffer_entry = ttk.Entry(group, textvariable=self.buffer_var, width=6, style="Compact.App.TEntry")
+        self.quick_buffer_entry.grid(row=0, column=1)
+        self._quick_side_groups = []
+        for label, variable in (("Left (ft)", self.left_buffer_var), ("Right (ft)", self.right_buffer_var)):
+            group, _ = quick_field(label)
+            entry = ttk.Entry(group, textvariable=variable, width=6, style="Compact.App.TEntry")
+            entry.grid(row=0, column=1)
+            self._quick_side_groups.append((group, entry))
+        self.quick_left_buffer_entry = self._quick_side_groups[0][1]
+        self.quick_right_buffer_entry = self._quick_side_groups[1][1]
+        group, _ = quick_field("Shapes")
         self.quick_section_count_spinbox = ttk.Spinbox(
-            self.quick_controls,
-            from_=1,
-            to=MAX_SECTION_COUNT,
-            textvariable=self.section_count_var,
-            width=5,
-            style="App.TSpinbox",
-        )
-        self.quick_section_count_spinbox.grid(row=0, column=3, padx=(0, 16), pady=0)
-        self.quick_overlap_label = ttk.Label(
-            self.quick_controls,
-            text="Overlap (ft)",
-            style="Field.TLabel",
-        )
-        self.quick_overlap_label.grid(row=0, column=4, padx=(0, 6), pady=0)
-        self.quick_overlap_entry = ttk.Entry(
-            self.quick_controls,
-            textvariable=self.overlap_var,
-            width=7,
-            style="App.TEntry",
-        )
-        self.quick_overlap_entry.grid(row=0, column=5, pady=0)
+            group, from_=1, to=MAX_SECTION_COUNT, textvariable=self.section_count_var,
+            width=4, style="Compact.App.TSpinbox")
+        self.quick_section_count_spinbox.grid(row=0, column=1)
+        group, self.quick_overlap_label = quick_field("Overlap (ft)")
+        self.quick_overlap_entry = ttk.Entry(group, textvariable=self.overlap_var, width=6, style="Compact.App.TEntry")
+        self.quick_overlap_entry.grid(row=0, column=1)
+        group, self.quick_shape_label_label = quick_field("Shape label")
+        self.quick_shape_label_entry = ttk.Entry(group, textvariable=self.shape_label_var, width=18, style="Compact.App.TEntry")
+        self.quick_shape_label_entry.grid(row=0, column=1)
 
         self.busy_progress = ttk.Progressbar(
             self.action_right_group,
@@ -1612,8 +1667,12 @@ class BoundaryKmzApp:
             self.output_name_entry,
             self.output_path_entry,
             self.quick_buffer_entry,
+            self.per_side_checkbutton, self.quick_per_side_checkbutton,
+            self.left_buffer_entry, self.right_buffer_entry,
+            self.quick_left_buffer_entry, self.quick_right_buffer_entry,
             self.quick_section_count_spinbox,
             self.quick_overlap_entry,
+            self.quick_shape_label_entry,
         ]
         self._busy_action_widgets = [
             self.change_input_button,
@@ -1631,6 +1690,8 @@ class BoundaryKmzApp:
             self.overlap_entry,
             self.quick_overlap_label,
             self.quick_overlap_entry,
+            self.quick_shape_label_label,
+            self.quick_shape_label_entry,
             self.shape_label_label,
             self.shape_label_entry,
             self.split_direction_label,
@@ -1813,7 +1874,7 @@ class BoundaryKmzApp:
     def _refresh_drawer_summaries(self) -> None:
         summaries = {
             "input": (
-                f"Buffer {self.buffer_var.get().strip() or '—'} ft · "
+                f"{self._buffer_summary()} · "
                 f"{self.outline_mode_var.get().strip() or 'Auto'}"
             ),
             "sections": (
@@ -1855,14 +1916,13 @@ class BoundaryKmzApp:
         self.empty_input_overlay.configure(padding=(20, 6) if short_preview else (28, 24))
         self.drop_label.configure(pady=3 if short_preview else 22)
         self.empty_title_label.configure(
-            text="Start a new boundary" if short_preview else "From flight to finished outline",
+            text="Select input",
             font=("Segoe UI", 15 if short_preview else 20, "bold"),
         )
-        for label in (self.empty_caption_label, self.empty_hint_label):
-            if short_preview:
-                label.grid_remove()
-            else:
-                label.grid()
+        if short_preview:
+            self.empty_hint_label.grid_remove()
+        else:
+            self.empty_hint_label.grid()
         self._place_empty_input_overlay()
         if hasattr(self, "imagery_status_label"):
             # Keep navigation and the imagery checkbox available on narrow views.
@@ -1884,7 +1944,7 @@ class BoundaryKmzApp:
         buttons = (self.change_input_button, self.settings_button,
                    self.sections_settings_button, self.output_settings_button, self.view_button)
         action_width = sum(button.winfo_reqwidth() + 6 for button in buttons)
-        self._header_breakpoint = max(HEADER_MIN_BREAKPOINT, action_width + 300)
+        self._header_breakpoint = max(HEADER_MIN_BREAKPOINT, action_width + 250)
         compact = current_width < self._header_breakpoint
         self._header_compact = compact
         self.compact_input_target.grid(row=0, column=0, columnspan=2 if compact else 1,
@@ -1893,13 +1953,14 @@ class BoundaryKmzApp:
                                  columnspan=2 if compact else 1,
                                  sticky="w" if compact else "e", pady=(8, 0) if compact else 0)
         row = column = used = 0
-        available = max(250, current_width - 64)
+        available = max(250, current_width - 56)
+        button_gap = 4 if compact else 6
         for button in buttons:
-            requested = button.winfo_reqwidth() + 6
+            requested = button.winfo_reqwidth() + button_gap
             if used and used + requested > available:
                 row += 1
                 column = used = 0
-            button.grid(row=row, column=column, padx=(0, 6), pady=(3 if row else 0, 0))
+            button.grid(row=row, column=column, padx=(0, button_gap), pady=(3 if row else 0, 0))
             used += requested
             column += 1
         if current_width < 1040 or self._focus_mode:
@@ -1915,29 +1976,47 @@ class BoundaryKmzApp:
         if not hasattr(self, "action_left_group"):
             return
         self.root.update_idletasks()
+        active_groups = self._active_quick_buffer_groups()
+        for group in self._quick_field_groups:
+            if group not in active_groups:
+                group.grid_remove()
+        natural_width = sum(group.winfo_reqwidth() + 14 for group in active_groups)
         self._action_bar_breakpoint = max(
-            ACTION_BAR_MIN_BREAKPOINT,
-            max(self.quick_controls.winfo_reqwidth(), self.preview_state_label.winfo_reqwidth() + 80)
-            + self.action_right_group.winfo_reqwidth()
-            + 32,
+            ACTION_BAR_MIN_BREAKPOINT, natural_width + self.action_right_group.winfo_reqwidth() + 48,
         )
         current_width = width or self.root.winfo_width()
         compact = current_width < self._action_bar_breakpoint
-        if compact == self._action_bar_compact:
-            return
         self._action_bar_compact = compact
-        self.action_left_group.grid_forget()
-        self.action_right_group.grid_forget()
+        self.action_left_group.grid(row=0, column=0, sticky="ew")
+        self.action_right_group.grid(row=0, column=1, sticky="e", padx=(12, 0))
         if compact:
-            # Named settings menus retain every control when this duplicate
-            # quick-edit row would squeeze the primary actions.
-            self.quick_controls.grid_remove()
-            self.action_left_group.grid(row=0, column=0, sticky="ew")
-            self.action_right_group.grid(row=1, column=0, sticky="e", pady=(8, 0))
+            self.quick_controls.grid(in_=self.action_bar, row=1, column=0, columnspan=2,
+                                     sticky="w", pady=(4, 0))
+            self.export_destination_label.grid_remove()
         else:
-            self.quick_controls.grid()
-            self.action_left_group.grid(row=0, column=0, sticky="ew")
-            self.action_right_group.grid(row=0, column=1, sticky="e", padx=(12, 0))
+            self.export_destination_label.grid()
+            self.quick_controls.grid(in_=self.action_left_group, row=1, column=0, columnspan=8,
+                                     sticky="w", pady=(4, 0))
+        available = max(250, current_width - 48) if compact else natural_width
+        if not hasattr(self, "_quick_control_rows"):
+            self._quick_control_rows = []
+        row = column = used = 0
+        for group in active_groups:
+            requested = group.winfo_reqwidth() + 14
+            if used and used + requested > available:
+                row += 1
+                column = used = 0
+            if row == len(self._quick_control_rows):
+                self._quick_control_rows.append(ttk.Frame(self.quick_controls, style="ActionBar.TFrame"))
+            row_frame = self._quick_control_rows[row]
+            row_frame.grid(row=row, column=0, sticky="w", pady=(6 if row else 0, 0))
+            group.grid(in_=row_frame, row=0, column=column, sticky="w", padx=(0, 14))
+            # The row frame is a newer sibling, so place managed controls above it.
+            group.lift()
+            used += requested
+            column += 1
+        for unused_row in self._quick_control_rows[row + 1:]:
+            unused_row.grid_remove()
 
     def _refresh_input_shell_state(self) -> None:
         text = self.parent_var.get().strip()
@@ -2095,7 +2174,8 @@ class BoundaryKmzApp:
         )
         return (
             self.parent_var.get().strip(),
-            self.buffer_var.get().strip(),
+            ("per_side:" + self.left_buffer_var.get().strip() + ":" + self.right_buffer_var.get().strip()
+             if self.per_side_var.get() else self.buffer_var.get().strip()),
             self.outline_mode_var.get().strip(),
             self.section_count_var.get().strip(),
             self.overlap_var.get().strip(),
@@ -2709,11 +2789,116 @@ class BoundaryKmzApp:
         current_text = self.parent_var.get().strip()
         if current_text != self._last_input_text:
             self._last_input_text = current_text
+            self._reset_per_side_input()
             self._clear_preview_for_input_change()
         self._refresh_input_shell_state()
         self._refresh_drawer_summaries()
 
+    def _buffer_summary(self) -> str:
+        if self.per_side_var.get():
+            return f"L {self.left_buffer_var.get().strip() or '—'} / R {self.right_buffer_var.get().strip() or '—'} ft"
+        return f"Buffer {self.buffer_var.get().strip() or '—'} ft"
+
+    def _read_buffer_settings(self) -> BufferSettings:
+        try:
+            if self.per_side_var.get():
+                if not self._compatibility or not self._compatibility.eligible:
+                    raise ValueError("This input is not compatible with per-side buffers.")
+                return BufferSettings.per_side(self.left_buffer_var.get(), self.right_buffer_var.get())
+            return BufferSettings(unified_ft=self.buffer_var.get())
+        except ValueError as exc:
+            raise BoundaryError(str(exc)) from exc
+
+    def _reset_per_side_input(self) -> None:
+        self._input_generation += 1
+        self._compatibility = None
+        self._compatibility_identity = None
+        self._updating_buffer_mode = True
+        try:
+            self.per_side_var.set(False)
+            self.left_buffer_var.set("")
+            self.right_buffer_var.set("")
+        finally:
+            self._updating_buffer_mode = False
+        self._refresh_buffer_controls()
+
+    def _toggle_per_side(self, location: str = "drawer") -> None:
+        enabled = self.per_side_var.get()
+        self._updating_buffer_mode = True
+        try:
+            if enabled:
+                if self._busy or not self._compatibility or not self._compatibility.eligible:
+                    self.per_side_var.set(False)
+                    return
+                left, right = seed_side_fields(self.buffer_var.get())
+                self.left_buffer_var.set(left)
+                self.right_buffer_var.set(right)
+        except ValueError as exc:
+            self.per_side_var.set(False)
+            messagebox.showerror("Invalid buffer", str(exc), parent=self.root)
+        finally:
+            self._updating_buffer_mode = False
+            self._refresh_buffer_controls()
+        self._invalidate_cache()
+        self._mark_preview_stale("Buffer mode changed.")
+        self._refresh_drawer_summaries()
+        if location == "footer":
+            entry = self.quick_left_buffer_entry if self.per_side_var.get() else self.quick_buffer_entry
+        else:
+            entry = self.left_buffer_entry if self.per_side_var.get() else self.buffer_entry
+        entry.focus_set()
+
+    def _on_side_buffer_changed(self, *_args: object) -> None:
+        if self._updating_buffer_mode or not self.per_side_var.get():
+            return
+        self._invalidate_cache()
+        self._mark_preview_stale("Side buffer changed.")
+        self._refresh_drawer_summaries()
+
+    def _active_quick_buffer_groups(self) -> list[ttk.Frame]:
+        excluded = set()
+        if not self._compatibility or not self._compatibility.eligible:
+            excluded.add(self._quick_mode_group)
+        if self.per_side_var.get():
+            excluded.add(self._quick_unified_group)
+        else:
+            excluded.update(group for group, _ in self._quick_side_groups)
+        return [group for group in self._quick_field_groups if group not in excluded]
+
+    def _refresh_buffer_controls(self) -> None:
+        if not hasattr(self, "per_side_checkbutton") or not hasattr(self, "left_buffer_entry"):
+            return
+        eligible = bool(self._compatibility and self._compatibility.eligible)
+        if eligible:
+            self.per_side_checkbutton.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        else:
+            self.per_side_checkbutton.grid_remove()
+        if self.per_side_var.get():
+            self._drawer_unified_group.grid_remove()
+        else:
+            self._drawer_unified_group.grid(row=1, column=0, columnspan=2, sticky="ew")
+        for index, (group, _) in enumerate(self._drawer_side_groups):
+            if self.per_side_var.get():
+                group.grid(row=1, column=index, sticky="ew", padx=(0, 4) if index == 0 else (4, 0))
+            else:
+                group.grid_remove()
+        for name in ("per_side_checkbutton", "quick_per_side_checkbutton"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(state="normal" if eligible and not self._busy else "disabled")
+        if hasattr(self, "quick_controls") and self._buffer_layout_after_id is None:
+            self._buffer_layout_after_id = self.root.after_idle(self._finish_buffer_layout)
+
+    def _finish_buffer_layout(self) -> None:
+        self._buffer_layout_after_id = None
+        if self._closing:
+            return
+        self._refresh_action_bar_layout()
+        self._update_settings_scrollregion(None)
+
     def _on_buffer_changed(self, *_args: object) -> None:
+        if self.per_side_var.get() or self._updating_buffer_mode:
+            return
         self._invalidate_cache()
         self._mark_preview_stale("Buffer changed.")
         self._refresh_drawer_summaries()
@@ -2785,13 +2970,7 @@ class BoundaryKmzApp:
             "Overlap is shared between neighboring shapes." if multiple_sections
             else "Use 2 or more shapes to enable splitting."
         ))
-        if hasattr(self, "quick_overlap_label"):
-            if multiple_sections:
-                self.quick_overlap_label.grid()
-                self.quick_overlap_entry.grid()
-            else:
-                self.quick_overlap_label.grid_remove()
-                self.quick_overlap_entry.grid_remove()
+        if hasattr(self, "quick_controls"):
             self._refresh_action_bar_layout()
 
     def _update_outline_mode_state(self) -> None:
@@ -2868,7 +3047,7 @@ class BoundaryKmzApp:
     def _start_preview_generation(
         self,
         input_path: Path,
-        buffer_ft: float,
+        buffer_ft: _BufferValue,
         section_count: int,
         overlap_ft: float,
         shape_label: str,
@@ -2876,6 +3055,7 @@ class BoundaryKmzApp:
         split_direction_deg: float | None,
         simplify_vector_output: bool,
     ) -> None:
+        request = self._new_geometry_request(input_path, buffer_ft)
         self._set_busy(True, "Reading input and building preview...")
         worker = threading.Thread(
             target=self._scan_worker,
@@ -2888,6 +3068,7 @@ class BoundaryKmzApp:
                 outline_mode,
                 split_direction_deg,
                 simplify_vector_output,
+                request,
             ),
             daemon=True,
         )
@@ -2932,8 +3113,10 @@ class BoundaryKmzApp:
             GENERATION_PROFILE_EXPORT,
             simplify_vector_output=simplify_vector_output,
         )
+        request = self._new_geometry_request(input_path, buffer_ft)
         cached_result = (
-            self._cached_result if self._cached_settings == settings else None
+            self._cached_result if self._cached_settings == settings
+            and self._cached_source_identity == request.identity else None
         )
 
         self._set_busy(True, "Exporting KMZ...")
@@ -2950,69 +3133,78 @@ class BoundaryKmzApp:
                 simplify_vector_output,
                 output_path,
                 cached_result,
+                request,
             ),
             daemon=True,
         )
         worker.start()
 
+    def _new_geometry_request(self, input_path: Path, buffer_value: _BufferValue) -> _GeometryRequest:
+        self._request_sequence += 1
+        settings = buffer_value if isinstance(buffer_value, BufferSettings) else BufferSettings(unified_ft=buffer_value)
+        try:
+            identity = source_identity(input_path)
+        except OSError:
+            identity = None
+        request = _GeometryRequest(self._request_sequence, self._input_generation,
+                                   input_path, identity, settings)
+        self._active_request = request
+        return request
+
+    def _generate_for_request(self, request: _GeometryRequest, **options) -> BoundaryResult:
+        # Worker-only path: no Tk variables, UI APIs, or extra parser process.
+        path = request.input_path
+        scalar = request.buffer.unified_ft if request.buffer.mode == "unified" else 0.0
+        if path.suffix.lower() in {".kml", ".kmz"}:
+            parsed = load_vector_input(path)
+            if source_identity(path) != request.identity:
+                raise BoundaryError("Input changed while being read. Update Preview to reload it.")
+            compatibility = classify_per_side_input(parsed)
+            self._queue.put(("compatibility", _WorkerMessage(request, compatibility)))
+            options.pop("outline_mode", None)
+            result = generate_boundary_from_vector_geometry(
+                parsed, scalar, buffer_settings=request.buffer, **options)
+        else:
+            result = generate_boundary_from_input(path, scalar, buffer_settings=request.buffer, **options)
+        if source_identity(path) != request.identity:
+            raise BoundaryError("Input changed during processing. Update Preview to reload it.")
+        return result
+
     def _scan_worker(
-        self,
-        input_path: Path,
-        buffer_ft: float,
-        section_count: int,
-        overlap_ft: float,
-        shape_label: str,
-        outline_mode: str,
-        split_direction_deg: float | None,
-        simplify_vector_output: bool,
+        self, input_path: Path, buffer_ft: _BufferValue, section_count: int, overlap_ft: float,
+        shape_label: str, outline_mode: str, split_direction_deg: float | None,
+        simplify_vector_output: bool, request: _GeometryRequest,
     ) -> None:
         try:
-            result = generate_boundary_from_input(
-                input_path,
-                buffer_ft,
-                section_count=section_count,
-                overlap_ft=overlap_ft,
-                shape_label=shape_label,
-                outline_mode=outline_mode,
-                split_direction_deg=split_direction_deg,
+            result = self._generate_for_request(request,
+                section_count=section_count, overlap_ft=overlap_ft, shape_label=shape_label,
+                outline_mode=outline_mode, split_direction_deg=split_direction_deg,
                 generation_profile=GENERATION_PROFILE_PREVIEW,
-                simplify_vector_output=simplify_vector_output,
-            )
+                simplify_vector_output=simplify_vector_output)
         except Exception as error:
-            self._queue.put(("error", error))
+            self._queue.put(("error", _WorkerMessage(request, error)))
             return
-        self._queue.put(("scan_done", result))
+        self._queue.put(("scan_done", _WorkerMessage(request, result)))
 
     def _export_worker(
-        self,
-        input_path: Path,
-        buffer_ft: float,
-        section_count: int,
-        overlap_ft: float,
-        shape_label: str,
-        outline_mode: str,
-        split_direction_deg: float | None,
-        simplify_vector_output: bool,
-        output_path: Path,
-        cached_result: BoundaryResult | None,
+        self, input_path: Path, buffer_ft: _BufferValue, section_count: int, overlap_ft: float,
+        shape_label: str, outline_mode: str, split_direction_deg: float | None,
+        simplify_vector_output: bool, output_path: Path,
+        cached_result: BoundaryResult | None, request: _GeometryRequest,
     ) -> None:
         try:
-            result = cached_result or generate_boundary_from_input(
-                input_path,
-                buffer_ft,
-                section_count=section_count,
-                overlap_ft=overlap_ft,
-                shape_label=shape_label,
-                outline_mode=outline_mode,
-                split_direction_deg=split_direction_deg,
+            if source_identity(input_path) != request.identity:
+                raise BoundaryError("Input changed before export. Update Preview to reload it.")
+            result = cached_result or self._generate_for_request(request,
+                section_count=section_count, overlap_ft=overlap_ft, shape_label=shape_label,
+                outline_mode=outline_mode, split_direction_deg=split_direction_deg,
                 generation_profile=GENERATION_PROFILE_EXPORT,
-                simplify_vector_output=simplify_vector_output,
-            )
+                simplify_vector_output=simplify_vector_output)
             saved_path = save_kmz(result, output_path)
         except Exception as error:
-            self._queue.put(("error", error))
+            self._queue.put(("error", _WorkerMessage(request, error)))
             return
-        self._queue.put(("export_done", (result, saved_path)))
+        self._queue.put(("export_done", _WorkerMessage(request, (result, saved_path))))
 
     def _drain_queue(self) -> None:
         if self._closing:
@@ -3023,14 +3215,46 @@ class BoundaryKmzApp:
             except queue.Empty:
                 break
 
+            identity = None
+            if isinstance(payload, _WorkerMessage):
+                request = payload.request
+                if self._active_request is None or request.request_id != self._active_request.request_id:
+                    continue
+                if request.input_generation != self._input_generation:
+                    self._set_busy(False, "Input changed. Update Preview to reload it.")
+                    continue
+                try:
+                    identity = source_identity(request.input_path)
+                except OSError:
+                    identity = None
+                if identity != request.identity:
+                    self._reset_per_side_input()
+                    self._invalidate_cache()
+                    self._mark_preview_stale("Input file changed.")
+                    self._set_busy(False, "Input changed. Update Preview to reload it.")
+                    continue
+                payload = payload.payload
+            if kind == "compatibility":
+                self._compatibility = payload
+                self._compatibility_identity = identity
+                if not payload.eligible:
+                    self._updating_buffer_mode = True
+                    self.per_side_var.set(False)
+                    self.left_buffer_var.set("")
+                    self.right_buffer_var.set("")
+                    self._updating_buffer_mode = False
+                self._refresh_buffer_controls()
+                self._refresh_drawer_summaries()
+                continue
             if kind == "scan_done":
                 result = payload
                 assert isinstance(result, BoundaryResult)
                 self._sync_effective_buffer(result)
                 self._cached_result = result
+                self._cached_source_identity = identity
                 self._cached_settings = self._settings_key(
                     result.metadata.source_folder,
-                    result.metadata.buffer_ft,
+                    buffer_settings_from_metadata(result.metadata),
                     result.metadata.section_count,
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
@@ -3053,9 +3277,10 @@ class BoundaryKmzApp:
                 saved_path = Path(saved_path)
                 self._sync_effective_buffer(result)
                 self._cached_result = result
+                self._cached_source_identity = identity
                 self._cached_settings = self._settings_key(
                     result.metadata.source_folder,
-                    result.metadata.buffer_ft,
+                    buffer_settings_from_metadata(result.metadata),
                     result.metadata.section_count,
                     result.metadata.overlap_ft,
                     result.metadata.shape_label,
@@ -3119,7 +3344,7 @@ class BoundaryKmzApp:
         shape_label_text: str | None = None,
         split_direction_label: str | None = None,
         split_direction_degrees_text: str | None = None,
-    ) -> tuple[Path, float, int, float, str, str, float | None, bool, Path | None]:
+    ) -> tuple[Path, _BufferValue, int, float, str, str, float | None, bool, Path | None]:
         input_text = self.parent_var.get().strip()
         if not input_text:
             raise BoundaryError("Choose a JPG folder, KML file, or KMZ file.")
@@ -3133,13 +3358,8 @@ class BoundaryKmzApp:
         ):
             raise BoundaryError("Input must be a folder of JPGs, KML file, or KMZ file.")
 
-        buffer_text = self.buffer_var.get().strip()
-        try:
-            buffer_ft = float(buffer_text)
-        except ValueError as exc:
-            raise BoundaryError("Buffer must be a number in feet.") from exc
-        if buffer_ft < 0:
-            raise BoundaryError("Buffer must be 0 or greater.")
+        settings = self._read_buffer_settings()
+        buffer_ft = settings if settings.mode == "per_side" else settings.unified_ft
 
         section_text = (
             self.section_count_var.get()
@@ -3272,6 +3492,23 @@ class BoundaryKmzApp:
                 ]
             )
             key_entries.append(("JPG GPS points", "#1f77b4", "point", 1.0))
+        elif result.source_lines_projected:
+            for index, line in enumerate(result.source_lines_projected):
+                # Keep separate features separate; never join their endpoints.
+                x, y = line.xy
+                source_line = axes.plot(
+                    x, y, color="#60a5fa", linewidth=1.6,
+                    label="Source polylines" if index == 0 else "_nolegend_", zorder=25,
+                )[0]
+                self._style_preview_vector_artist(source_line, 1.6)
+                if result.metadata.buffer_mode == "per_side":
+                    for fraction in (0.25, 0.75):
+                        start = line.interpolate(max(0, fraction - 0.035), normalized=True)
+                        end = line.interpolate(min(1, fraction + 0.035), normalized=True)
+                        arrow = axes.annotate("", xy=(end.x, end.y), xytext=(start.x, start.y),
+                            arrowprops=dict(arrowstyle="-|>", color="#60a5fa", lw=1.6), zorder=26)
+                        arrow.set_gid("source-direction-arrow")
+            key_entries.append(("Source polylines", "#60a5fa", "-", 1.6))
         else:
             bx, by = self._preview_polygon_xy(result.base_polygon_projected)
             source_label = (
@@ -4407,6 +4644,7 @@ class BoundaryKmzApp:
             self.details_button.configure(
                 state="normal" if self._details_text.strip() else "disabled"
             )
+        self._refresh_buffer_controls()
         self.status_var.set(status)
         self._refresh_preview_state_badge()
         self._refresh_action_bar_layout()
@@ -4414,6 +4652,7 @@ class BoundaryKmzApp:
     def _invalidate_cache(self) -> None:
         self._cached_result = None
         self._cached_settings = None
+        self._cached_source_identity = None
 
     def _commit_input_entry(self, _event: object = None) -> None:
         text = self.parent_var.get().strip()
@@ -4429,6 +4668,8 @@ class BoundaryKmzApp:
         if self._busy:
             return
         self._loaded_input_text = str(input_path)
+        if self.parent_var.get() == str(input_path):
+            self._reset_per_side_input()
         self.parent_var.set(str(input_path))
         self.buffer_var.set("0")
         self.outline_mode_var.set("Auto")
@@ -4496,7 +4737,7 @@ class BoundaryKmzApp:
         return base_status
 
     def _sync_effective_buffer(self, result: BoundaryResult) -> None:
-        if not result.metadata.polyline_buffer_adjustment_reason:
+        if result.metadata.buffer_mode == "per_side" or not result.metadata.polyline_buffer_adjustment_reason:
             return
         selected_buffer = result.metadata.polyline_selected_buffer_ft or result.metadata.buffer_ft
         self.buffer_var.set(self._format_buffer_field_value(selected_buffer))
@@ -4549,7 +4790,7 @@ class BoundaryKmzApp:
     @staticmethod
     def _settings_key(
         input_path: Path,
-        buffer_ft: float,
+        buffer_ft: _BufferValue,
         section_count: int,
         overlap_ft: float,
         shape_label: str,
@@ -4558,10 +4799,11 @@ class BoundaryKmzApp:
         generation_profile: str = GENERATION_PROFILE_EXPORT,
         *,
         simplify_vector_output: bool = True,
-    ) -> tuple[str, float, int, float, str, str, str, str, str]:
+    ) -> _SettingsKey:
         return (
             str(Path(input_path).resolve()).lower(),
-            float(buffer_ft),
+            (buffer_ft.key if isinstance(buffer_ft, BufferSettings) and buffer_ft.mode == "per_side"
+             else float(buffer_ft.unified_ft if isinstance(buffer_ft, BufferSettings) else buffer_ft)),
             int(section_count),
             float(overlap_ft),
             shape_label.strip(),
@@ -4629,6 +4871,7 @@ def main() -> None:
 
 
 def _create_root() -> tk.Tk:
+    enable_windows_dpi_awareness()
     if TkinterDnD is not None:
         try:
             return TkinterDnD.Tk()

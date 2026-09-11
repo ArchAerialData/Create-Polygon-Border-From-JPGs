@@ -43,6 +43,42 @@ embedding those applications or copying their runtime dependencies.
 
 ## Validation
 
+Imported KML/KMZ linework is retained in `BoundaryResult.source_lines_projected`
+in the result CRS. Both preview surfaces draw the original features separately
+above the buffered output and include them in the legend. No file reread is
+needed when redrawing or opening Inspector; export geometry still comes from
+the existing final polygon and sections. The GUI now defaults the vector
+simplification checkbox to enabled, matching the core API's existing default.
+
+The footer includes Buffer, Shapes, Overlap, and Shape label using the canonical
+variables and worker-disabled states. The controls stay visible and wrap rather
+than disappearing on compact layouts. Original settings pages are preserved.
+Source geometry round-trip checks cover KML/KMZ and preview/export profiles;
+GUI checks cover separate source features on both canvases, synchronized footer
+editing, default simplification/opt-out, and control bounds at different scales.
+Offline screenshots were inspected at 1500×820 and 960×600.
+
+At system-aware 125% scaling, the existing extreme-attribution test (500 repeated
+W characters) overlaps the scale bar. This was reproduced by loading the
+pre-change HEAD GUI in memory with the same DPI startup, independently of this
+patch. The existing missing-KML-fixture failure is described below.
+The latest full run executed 232 tests with one opt-in skip; failures were the
+missing fixture and the three attribution subcases described above. The focused
+source-overlay, footer, simplification-default, and responsive-layout checks pass.
+
+Windows startup now selects system DPI awareness before Tk creates its first
+window. Existing awareness chosen by an embedding host is respected; older
+Windows APIs are fallbacks. System awareness is intentional for Tk 8.6's shared
+font/image scale. Live per-monitor rescaling would additionally need rebuilding
+those resources on monitor transitions and is not implemented here.
+
+A fresh-process Windows check confirmed awareness `1` (system-aware), window
+DPI `120`, system DPI `120`, and Tk resolution approximately `120` pixels/inch.
+The embedded Matplotlib canvas reported a device pixel ratio of `1.25` and
+figure DPI `125`, so no manual doubling of the preview resolution was added.
+The rendered settings window was inspected using an OS screenshot. The new
+fresh-process regression checks actual Windows DPI state, not mocked API calls.
+
 Field labels now use a dedicated white style in normal and disabled states.
 Loading via Browse, drop, or committing the input field resets buffer to zero
 and outline mode to Auto, then starts the existing background preview worker.

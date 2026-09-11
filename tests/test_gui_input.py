@@ -14,7 +14,7 @@ from zipfile import ZipFile
 
 import numpy as np
 from matplotlib.colors import to_rgba
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -47,6 +47,27 @@ from jpg_boundary_gui_window import OuterWindowBounds, WorkArea  # noqa: E402
 
 
 class GuiInputTests(TestCase):
+    def test_source_polylines_are_drawn_separately_in_both_previews(self) -> None:
+        with _app() as app:
+            result = _sample_boundary_result()
+            result.metadata = replace(result.metadata, input_type="KML polyline")
+            minx, miny, maxx, maxy = result.final_polygon_projected.bounds
+            result.source_lines_projected = (
+                LineString([(minx, miny), (maxx, miny)]),
+                LineString([(minx, maxy), (maxx, maxy)]),
+            )
+            app._cached_result = result
+            app._last_displayed_result = result
+            app._draw_preview(result)
+            app._open_fullscreen_preview()
+            for axes in (app.axes, app._fullscreen_axes):
+                artists = [line for line in axes.lines if line.get_color() == "#60a5fa"]
+                self.assertEqual(len(artists), 2)
+                self.assertEqual(artists[0].get_label(), "Source polylines")
+                for artist, source in zip(artists, result.source_lines_projected):
+                    np.testing.assert_allclose(artist.get_xydata(), source.coords)
+                    self.assertGreater(artist.get_zorder(), 22)
+
     def test_loading_folder_starts_zero_buffer_auto_preview(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app, patch.object(app, "_start_preview_generation") as start:
             app.buffer_var.set("75")
@@ -250,7 +271,9 @@ class GuiInputTests(TestCase):
                     app._refresh_workspace_layout()
                     root.update_idletasks()
                     for widget in (app.change_input_button, app.settings_button, app.sections_settings_button,
-                                   app.output_settings_button, app.view_button, app.scan_button, app.export_button):
+                                   app.output_settings_button, app.view_button, app.scan_button, app.export_button,
+                                   app.quick_buffer_entry, app.quick_section_count_spinbox,
+                                   app.quick_overlap_entry, app.quick_shape_label_entry):
                         right = widget.winfo_rootx() - root.winfo_rootx() + widget.winfo_width()
                         bottom = widget.winfo_rooty() - root.winfo_rooty() + widget.winfo_height()
                         self.assertLessEqual(right, width)
@@ -285,11 +308,11 @@ class GuiInputTests(TestCase):
 
             self.assertEqual(input_path, kml_path)
             self.assertEqual(outline_mode, "source_polygon")
-            self.assertFalse(simplify_vector_output)
+            self.assertTrue(simplify_vector_output)
 
-            app.simplify_vector_var.set(True)
+            app.simplify_vector_var.set(False)
 
-            self.assertTrue(app._read_inputs(require_output=False)[7])
+            self.assertFalse(app._read_inputs(require_output=False)[7])
 
     def test_custom_split_direction_is_normalized(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app:
@@ -689,6 +712,16 @@ class GuiInputTests(TestCase):
             app.section_count_spinbox.delete(0, "end")
             app.section_count_spinbox.insert(0, "3")
             self.assertEqual(app.quick_section_count_spinbox.get(), "3")
+            app.quick_overlap_entry.delete(0, "end")
+            app.quick_overlap_entry.insert(0, "30")
+            self.assertEqual(app.overlap_entry.get(), "30")
+            app.quick_shape_label_entry.delete(0, "end")
+            app.quick_shape_label_entry.insert(0, "Survey")
+            self.assertEqual(app.shape_label_entry.get(), "Survey")
+            app.shape_label_var.set("Updated")
+            self.assertEqual(app.quick_shape_label_entry.get(), "Updated")
+            app._set_busy(True, "Working")
+            self.assertTrue(app.quick_shape_label_entry.instate(["disabled"]))
 
     def test_settings_and_key_overlays_are_mutually_exclusive(self) -> None:
         with _app() as app:
@@ -770,21 +803,26 @@ class GuiInputTests(TestCase):
         with _app() as app:
             app._refresh_action_bar_layout(ACTION_BAR_MIN_BREAKPOINT - 1)
             self.assertTrue(app._action_bar_compact)
-            self.assertEqual(int(app.action_right_group.grid_info()["row"]), 1)
+            self.assertEqual(int(app.quick_controls.grid_info()["row"]), 1)
+            self.assertEqual(app.quick_controls.grid_info()["in"], app.action_bar)
 
             app._refresh_action_bar_layout(app._action_bar_breakpoint + 1)
             self.assertFalse(app._action_bar_compact)
             self.assertEqual(int(app.action_right_group.grid_info()["row"]), 0)
 
-    def test_quick_overlap_is_hidden_for_one_shape_and_visible_for_multiple(self) -> None:
+    def test_footer_section_fields_stay_visible_and_follow_section_state(self) -> None:
         with _app() as app:
             app.section_count_var.set("1")
             app.root.update_idletasks()
-            self.assertFalse(app.quick_overlap_entry.grid_info())
+            for widget in (app.quick_overlap_entry, app.quick_shape_label_entry):
+                self.assertTrue(widget.grid_info())
+                self.assertTrue(widget.instate(["disabled"]))
 
             app.section_count_var.set("2")
             app.root.update_idletasks()
-            self.assertTrue(app.quick_overlap_entry.grid_info())
+            for widget in (app.quick_overlap_entry, app.quick_shape_label_entry):
+                self.assertTrue(widget.grid_info())
+                self.assertFalse(widget.instate(["disabled"]))
 
     def test_buffer_change_invalidates_cache_and_marks_preview_stale(self) -> None:
         with _app() as app:
@@ -916,6 +954,8 @@ class GuiInputTests(TestCase):
 
     def test_focus_mode_reuses_canvas_and_restores_withdrawn_state(self) -> None:
         with _app() as app:
+            # Settle initial DPI/font geometry before recording the restore size.
+            app.root.update_idletasks()
             canvas = app.canvas
             callbacks = tuple(app._preview_event_cids)
             original_geometry = app.root.geometry()

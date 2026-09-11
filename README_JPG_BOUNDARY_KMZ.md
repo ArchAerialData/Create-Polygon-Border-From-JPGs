@@ -39,18 +39,65 @@ In the app:
 2. Open `Boundary` to choose the JPG outline mode and buffer in feet.
    `Sections` contains shape count, overlap, naming, and split direction.
    `Output` contains the KMZ name, destination, and vector export options remain
-   in `Boundary > Input & Geometry`.
+   in `Boundary`. Simplify output vertices is enabled by default for KML/KMZ exports.
 3. New inputs automatically preview in Auto mode at zero buffer. Linework that
-   needs width uses the existing Auto buffer search and shows its selected value.
+   needs width uses the smallest connected whole-foot buffer and shows its selected value.
    After editing settings, click `Update Preview`. The bottom bar also provides
-   quick buffer, shape-count, and overlap edits when there is room.
+   buffer, shape-count, overlap, and shape-label edits. These share values with
+   the settings panels; overlap and shape label activate for multiple shapes.
 4. Click `Export KMZ`. Completion appears inline, with `Open saved folder`
    pointing to the actual exported file's folder.
 5. Use `View` for the map legend, Focus Preview, the separate Inspector, and
    World Imagery. `Details` retains the full processing/export summary.
 
+## Buffer and section behavior
+
+- A valid positive polyline buffer stays at the requested distance, including
+  concave and branching corridors. Auto no longer enlarges it to meet a
+  perimeter/convex-hull regularity target.
+- Zero-width linework or disconnected buffers use the smallest connected buffer
+  in whole feet, searching up to 2,000 ft. Valid explicit distances above that
+  search limit are still accepted. Details reports any adjustment.
+- Auto sections first try parallel cuts, then connected recursive cuts with
+  alternative directions and backtracking. Exact areas are preferred; difficult
+  branches can use up to 20% area variation per section. Sectioning does not
+  increase the parent buffer. A bounded search can still report a failure for
+  an unsuitable count or geometry; custom directions remain explicit.
+- See [buffer and split validation](docs/polyline-buffer-hardening.md).
+
+### Optional per-side buffers
+
+For compatible **polyline-only KMZ** inputs, `Per-side buffer` appears in Boundary
+settings and `Per-side` appears in the footer. Compatibility is checked during
+background import. KML, JPG folders, polygons, mixed geometry, closed lines, and
+self-crossing lines keep this option hidden.
+
+- Checking either control replaces the unified field with synchronized **Left (ft)**
+  and **Right (ft)** fields. Each initially copies the full unified distance:
+  350 ft becomes 350/350 ft. A unified zero starts at 200/200 ft.
+- Unchecking restores the saved unified value. Re-enabling seeds both sides again
+  from that value. Loading another input resets to unified mode.
+- Left/right follows the blue direction arrows on each original source line in
+  the preview and Inspector. Several imported lines can have different directions.
+- Endpoints round off automatically. Their extension is the average of the two
+  side distances, so no separate endpoint field is needed.
+- One side may be zero; both cannot be zero. The entered side distances are
+  preserved. If they produce disconnected areas, generation explains the failure
+  instead of automatically increasing them. Unified Auto behavior remains available.
+- Use `Update Preview` after edits. Preview, splits, export, and Details share the
+  active side settings. Export simplification preserves original vertices when
+  simplification would lose source-line coverage.
+
+Diagnostic helper: `python -B src/polyline_compatibility.py "C:\path\input.kmz"`.
+It prints eligibility and a reason as JSON (exit 0 for eligible, 1 otherwise).
+See the [completed implementation and validation record](docs/per-side-buffer-implementation-plan.md).
+
 ## GUI layout and workflow
 
+- Windows startup enables system DPI awareness before creating Tk windows, so
+  text and controls render at system resolution instead of being bitmap-scaled.
+  The embedded preview also uses Matplotlib's DPI scaling. Moving the window to
+  a monitor with a different scale can still require per-monitor DPI support.
 - Field headings stay white, including headings for disabled controls. Loading
   an input through Browse, drag-and-drop, or committing a typed path starts a
   background preview with buffer reset to zero and outline mode reset to Auto.
@@ -64,9 +111,12 @@ In the app:
   The custom angle appears when Custom split direction is selected. Panels scroll
   within the available height and retain the current map view.
 - The header reflows based on measured button widths. Short windows use a
-  compact brand header and welcome card. On narrow windows, secondary imagery
-  status and duplicate quick-edit controls give way to the primary actions;
-  their settings remain available through the menus.
+  compact brand header and welcome card. Footer controls remain available and
+  wrap on narrow windows; the duplicate destination caption is hidden as needed.
+  All original settings menus remain available.
+- Original imported polylines appear in blue in both the main preview and
+  Inspector, above the generated boundary. The legend identifies them as
+  `Source polylines`. Export simplification does not change this source overlay.
 - Startup sizing still uses the monitor's taskbar-safe work area. Resizing is
   coalesced into an idle layout pass; fonts and checkbox indicators respect
   Tk's display scaling. Focus Preview and Inspector retain their existing
