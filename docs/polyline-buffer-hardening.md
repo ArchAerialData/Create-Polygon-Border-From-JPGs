@@ -23,13 +23,14 @@ area, and cover all projected source linework. The former regularity score is
 retained as a diagnostic with its enforcement target disabled.
 
 `src/jpg_boundary_kmz_core.py` still tries natural parallel sections first.
-Its recursive fallback now tries alternative connected cuts, complementary
-section allocations, and a finer 5-degree direction grid, and backtracks when
-later sections cannot split. Exact equal areas are preferred. If that search
-fails, it tries nearby area allocations while bounding every final section to
-20% of the original average area, preventing cumulative recursive imbalance.
-Both passes have bounded search work. Parent buffering remains independent of
-section count; overlap is clipped to that parent.
+The [ortho crop follow-up](ortho-crop-sectioning.md) adds short cross-cut checks
+to both Auto splitters. The recursive fallback tries alternative connected cuts,
+complementary section allocations, a 5-degree grid, and positions around bends
+and junctions. It backtracks when later sections cannot split. Short cuts take
+priority over exact equal areas. The September 12
+[junction follow-up](workspace-bend-export-follow-up.md) first seeks a 20% area
+bound, then permits up to 35% to avoid pointed crop ends. Search work is bounded. Parent buffering remains
+independent of section count; overlap is clipped to that parent.
 
 Very thin, branched corridors may take tens of seconds to search. Auto is not a
 guarantee that every count or custom direction is geometrically feasible. An
@@ -48,7 +49,7 @@ possible. Explicit custom directions retain their existing behavior.
   connected whole-foot selection, gaps needing more than 500 ft, invalid numeric
   values, disconnected inputs beyond the search limit, and valid explicit
   buffers above that search limit.
-- Actual customer KMZ: 350 ft with 1–6, 8, and 12 sections; 250 ft with 3 sections;
+- Actual customer KMZ: 350 ft with 1â€“6, 8, and 12 sections; 250 ft with 3 sections;
   50 ft with 3, 5, and 8 sections; Auto zero with 1 and 4 sections (selects 2 ft).
   Verification checks section validity, count, source coverage, and union-area
   error below 1e-8 relative to the parent.

@@ -307,7 +307,8 @@ class CoreRegressionTests(TestCase):
                         combined = unary_union(parts)
                         self.assertLess(combined.symmetric_difference(parent).area / parent.area, 1e-8)
                         self.assertTrue(all(combined.buffer(1e-6).covers(line) for line in result.source_lines_projected))
-                        self.assertLess(result.metadata.split_area_variance_pct, 20.0001)
+                        # A clean junction may need the bounded wider-area pass.
+                        self.assertLess(result.metadata.split_area_variance_pct, 35.0001)
 
     def test_regular_explicit_polyline_buffer_is_not_adjusted(self) -> None:
         with TemporaryDirectory() as tmp:

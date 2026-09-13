@@ -59,11 +59,25 @@ In the app:
   in whole feet, searching up to 2,000 ft. Valid explicit distances above that
   search limit are still accepted. Details reports any adjustment.
 - Auto sections first try parallel cuts, then connected recursive cuts with
-  alternative directions and backtracking. Exact areas are preferred; difficult
-  branches can use up to 20% area variation per section. Sectioning does not
+  alternative directions and backtracking. Short cuts across the corridor take
+  priority over exact equal areas; long cuts down narrow corridors are rejected.
+  Cuts also avoid acute ends beside bends. Auto first seeks areas within 20%
+  of average, then permits up to 35% when needed for clean junctions. Sectioning does not
   increase the parent buffer. A bounded search can still report a failure for
   an unsuitable count or geometry; custom directions remain explicit.
-- See [buffer and split validation](docs/polyline-buffer-hardening.md).
+- Export simplification checks the sections together for interior coverage gaps.
+  When simplifying would open a gap beyond the existing outer-edge tolerance,
+  export retains the original section vertices.
+- See [buffer validation](docs/polyline-buffer-hardening.md) and
+  [ortho crop split correction and verification](docs/ortho-crop-sectioning.md),
+  followed by the [import/layout/bend/export follow-up](docs/workspace-bend-export-follow-up.md).
+- `New input` returns to the import screen and clears the previous preview.
+  Failed imports with no displayed result restore the browse/drop controls.
+- The header uses a single brand row. On wide windows, status, quick settings,
+  export actions, and the saved-folder link share one footer row; smaller windows wrap.
+- KMZ polygons export as unfilled colored outlines with Google Earth line width
+  **5**, clamped to ground. Coordinates are always WGS84 longitude/latitude;
+  projected UTM coordinates are used internally for distance and area calculations.
 
 ### Optional per-side buffers
 
@@ -77,7 +91,7 @@ self-crossing lines keep this option hidden.
   350 ft becomes 350/350 ft. A unified zero starts at 200/200 ft.
 - Unchecking restores the saved unified value. Re-enabling seeds both sides again
   from that value. Loading another input resets to unified mode.
-- Left/right follows the blue direction arrows on each original source line in
+- Left/right follows the white direction arrows on each original source line in
   the preview and Inspector. Several imported lines can have different directions.
 - Endpoints round off automatically. Their extension is the average of the two
   side distances, so no separate endpoint field is needed.
@@ -91,6 +105,8 @@ self-crossing lines keep this option hidden.
 Diagnostic helper: `python -B src/polyline_compatibility.py "C:\path\input.kmz"`.
 It prints eligibility and a reason as JSON (exit 0 for eligible, 1 otherwise).
 See the [completed implementation and validation record](docs/per-side-buffer-implementation-plan.md).
+The [follow-up audit](docs/per-side-buffer-follow-up-audit.md) records edge-case
+fixes, export failure protection, display checks, and regression coverage.
 
 ## GUI layout and workflow
 
@@ -114,9 +130,16 @@ See the [completed implementation and validation record](docs/per-side-buffer-im
   compact brand header and welcome card. Footer controls remain available and
   wrap on narrow windows; the duplicate destination caption is hidden as needed.
   All original settings menus remain available.
-- Original imported polylines appear in blue in both the main preview and
-  Inspector, above the generated boundary. The legend identifies them as
-  `Source polylines`. Export simplification does not change this source overlay.
+- Original imported polylines and their arrows appear in white with a dark outline
+  in both the main preview and Inspector, above the generated boundary. White is
+  reserved for source lines so they remain distinct from colored sections. The
+  legend identifies them as `Source polylines`.
+- `Input polylines`, beside `World Imagery` in both previews, instantly hides or
+  restores source lines, arrows, and their legend entry. It starts enabled and
+  shares the current choice between views, including when Inspector is reopened.
+  The checkbox is disabled when the preview has no imported polylines. This is
+  a display setting: it preserves zoom, generated polygons, and KMZ export content.
+  Both layer toggles stay together when the toolbar wraps in a narrow window.
 - Startup sizing still uses the monitor's taskbar-safe work area. Resizing is
   coalesced into an idle layout pass; fonts and checkbox indicators respect
   Tk's display scaling. Focus Preview and Inspector retain their existing
@@ -242,8 +265,8 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
   confidence, candidate summary, and any non-blocking Auto fallback reason.
 - When `# of Shapes` is greater than `1`, the app first tries connected
   same-direction sections intended to look natural as orthomosaic crops. In
-  `Auto`, a connected equal-area fallback is used when one parallel direction
-  cannot produce the requested count cleanly.
+  `Auto`, a connected fallback with short cross-cuts and balanced areas is used
+  when one parallel direction cannot produce the requested count cleanly.
 - Split direction can be `Auto`, `0 deg / East-West`, `90 deg / North-South`,
   or a custom degree value. `Auto` uses source-line orientation when available
   and otherwise uses the parent polygon orientation.
@@ -251,7 +274,8 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
   split boundaries. A `50 ft` overlap means adjacent sections overlap by
   roughly 50 ft along shared cut areas.
 - Natural section base areas must stay within 20 percent of the average base
-  section area. If neither the natural splitter nor the connected `Auto`
+  section area; the connected Auto fallback can allow up to 35 percent to retain
+  clean junctions. If neither the natural splitter nor the connected `Auto`
   fallback can produce usable sections, generation fails before export.
 - Section numbers use a static north-up map viewpoint and are assigned only
   after section geometry is complete. Horizontal-dominant runs read from left

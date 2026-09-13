@@ -4,6 +4,12 @@ Status: implemented September 11, 2026. No implementation blockers remain.
 The completion record below documents delivered behavior, verification, known
 issues, and follow-up suggestions. The numbered sections retain the agreed design.
 
+The September 11 [follow-up audit](per-side-buffer-follow-up-audit.md) hardens
+geometry, asynchronous state, validation, and export writes, and closes the three
+attribution failures recorded in the original implementation run below.
+Its final integrated run completed **270 tests with zero failures and one optional
+live-service skip**. This supersedes the original known-failure status below.
+
 This plan incorporates the user's final correction: copy the full unified
 distance into each side. It extends the earlier
 [feasibility study](per-side-buffer-feasibility.md) with the zero-value default
@@ -96,15 +102,13 @@ Local diagnostic artifacts (temporary, not repository dependencies):
 
 ### Known issues and follow-up suggestions
 
-- **Pre-existing test issue:** at system-aware 125% scaling, the attribution
-  collision test with a 500-character unbroken credit string fails for main
-  Settings, main Key, and Inspector Key. These failures were reproduced before
-  implementation and are outside this feature. Resolve the credit/scale-bar
-  layout in a separate UI patch.
-- The combined GUI test run also emits nonfatal Tk progress-bar callback messages
-  during test-window teardown, plus Matplotlib aspect-limit notices. Individual
-  feature runs pass; cleaning up the test harness's remaining timers is a useful
-  follow-up. These messages are retained in the full-suite log.
+- **Resolved in the follow-up audit:** the three existing attribution collisions
+  (main Settings, main Key, Inspector Key). Credits now use measured available
+  space and can extend above an open panel. The Inspector minimum follows display
+  scaling; full credit text remains at 9 pt.
+- **Resolved in the follow-up audit:** progress-bar and owned layout/queue timers
+  now stop on shutdown. The integrated run no longer emits the earlier Tk
+  callback errors. Matplotlib's informational aspect-limit notices remain.
 - Per-side availability intentionally excludes KML, mixed geometry, closed rings,
   and self-crossing individual lines. Pure KML polylines are the simplest future
   extension; rings require a separate inside/outside policy.

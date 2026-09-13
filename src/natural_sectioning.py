@@ -6,12 +6,16 @@ from dataclasses import dataclass
 import numpy as np
 from pyproj import Transformer
 from shapely.affinity import rotate
-from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box
+from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon, box
 from shapely.ops import transform as transform_geometry
 from shapely.validation import make_valid
 
 from geometry_hardening import densify_projected_geometry, fill_polygon_interiors
 from section_ordering import orient_parallel_parts_for_human_view
+from section_quality import (
+    MAX_AUTO_CUT_WIDTH_RATIO, MIN_AUTO_CROSSING_ANGLE_DEG,
+    cut_width_ratio, minimum_crossing_angle,
+)
 
 
 ACRES_PER_SQUARE_METER = 0.000247105381467
@@ -52,6 +56,7 @@ class _NaturalSplitCandidate:
     base_parts: list[Polygon]
     output_parts: list[Polygon]
     area_variance_ratio: float
+    maximum_cut_width_ratio: float
 
 
 def build_natural_sections(
@@ -166,6 +171,7 @@ def _select_split_candidate(
                         overlap_m,
                         direction,
                         max_area_variance_ratio,
+                        require_cross_cuts=True,
                     )
                 )
             except NaturalSplitError as exc:
@@ -187,6 +193,8 @@ def _build_natural_split_candidate(
     overlap_m: float,
     direction: float,
     max_area_variance_ratio: float,
+    *,
+    require_cross_cuts: bool = False,
 ) -> _NaturalSplitCandidate:
     center = (parent_polygon.centroid.x, parent_polygon.centroid.y)
     rotated_parent = _strict_single_polygon(
@@ -199,6 +207,28 @@ def _build_natural_split_candidate(
 
     cut_values = _equal_area_cut_values(rotated_parent, section_count, miny, maxy)
     margin = max(maxx - minx, maxy - miny) * 2.0 + max(overlap_m, 1.0)
+    maximum_cut_ratio = max(
+        (
+            cut_width_ratio(
+                rotated_parent,
+                rotated_parent.intersection(
+                    LineString([(minx - margin, value), (maxx + margin, value)])
+                ).length,
+            )
+            for value in cut_values[1:-1]
+        ),
+        default=0.0,
+    )
+    if require_cross_cuts and maximum_cut_ratio > MAX_AUTO_CUT_WIDTH_RATIO:
+        raise NaturalSplitError("Auto split would cut lengthwise through a narrow corridor.")
+    if require_cross_cuts and any(
+        minimum_crossing_angle(
+            rotated_parent,
+            rotated_parent.intersection(LineString([(minx - margin, value), (maxx + margin, value)])),
+        ) < MIN_AUTO_CROSSING_ANGLE_DEG - 1e-6
+        for value in cut_values[1:-1]
+    ):
+        raise NaturalSplitError("Auto split would create a pointed crop end beside a bend.")
     base_parts: list[Polygon] = []
     output_parts: list[Polygon] = []
     half_overlap = overlap_m / 2.0
@@ -246,6 +276,7 @@ def _build_natural_split_candidate(
         base_parts=base_parts,
         output_parts=output_parts,
         area_variance_ratio=area_variance_ratio,
+        maximum_cut_width_ratio=maximum_cut_ratio,
     )
 
 
@@ -341,8 +372,9 @@ def _unique_normalized_directions(values: list[float]) -> list[float]:
     return directions
 
 
-def _auto_split_candidate_score(candidate: _NaturalSplitCandidate) -> tuple[float, float]:
+def _auto_split_candidate_score(candidate: _NaturalSplitCandidate) -> tuple[float, float, float]:
     return (
+        round(candidate.maximum_cut_width_ratio, 6),
         round(candidate.area_variance_ratio, 6),
         sum(_polygon_compactness_score(part) for part in candidate.output_parts),
     )

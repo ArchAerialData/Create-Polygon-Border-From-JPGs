@@ -65,7 +65,13 @@ class PerSideCoreTests(TestCase):
                                 transform = Transformer.from_crs(4326, result.metadata.epsg, always_xy=True)
                                 saved = [Polygon([transform.transform(*map(float, token.split(",")[:2]))
                                                   for token in ring.text.split()]) for ring in rings]
-                                self.assertLess(unary_union(saved).boundary.hausdorff_distance(output_union.boundary), 0.002)
+                                # Nanometre projection round-off can merge or separate
+                                # zero-overlap seams, changing a union's *internal*
+                                # boundaries without changing any exported crop.
+                                # Check every crop, then the complete covered area.
+                                for original, restored in zip(polygons, saved):
+                                    self.assertLess(original.boundary.hausdorff_distance(restored.boundary), 0.002)
+                                self.assertLess(unary_union(saved).symmetric_difference(output_union).area / output_union.area, 1e-8)
 
     def test_zero_side_export_keeps_source_even_when_simplified(self):
         # Bends put source vertices directly on the output edge when a side is zero.

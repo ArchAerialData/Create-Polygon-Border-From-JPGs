@@ -61,12 +61,66 @@ class GuiInputTests(TestCase):
             app._draw_preview(result)
             app._open_fullscreen_preview()
             for axes in (app.axes, app._fullscreen_axes):
-                artists = [line for line in axes.lines if line.get_color() == "#60a5fa"]
+                artists = [line for line in axes.lines if line.get_gid() == "source-polyline"]
                 self.assertEqual(len(artists), 2)
                 self.assertEqual(artists[0].get_label(), "Source polylines")
                 for artist, source in zip(artists, result.source_lines_projected):
+                    self.assertEqual(artist.get_color(), gui_module.PREVIEW_SOURCE_LINE_COLOR)
                     np.testing.assert_allclose(artist.get_xydata(), source.coords)
                     self.assertGreater(artist.get_zorder(), 22)
+
+    def test_input_polyline_toggle_syncs_views_without_changing_boundary_or_view(self) -> None:
+        with _app() as app:
+            self.assertTrue(app.input_polylines_var.get())
+            self.assertIn("disabled", app.input_polylines_checkbutton.state())
+            result = _sample_boundary_result()
+            result.metadata = replace(result.metadata, input_type="KMZ polyline", buffer_mode="per_side")
+            result.source_lines_projected = (LineString([(10, 10), (70, 10), (70, 40)]),)
+            app._cached_result = result
+            app._last_displayed_result = result
+            app._draw_preview(result)
+            app._mark_preview_current()
+            app._open_fullscreen_preview()
+            snapshots = []
+            for surface in app._active_map_surfaces():
+                surface.canvas.draw()
+                snapshots.append((surface, surface.axes.get_xlim(), surface.axes.get_ylim(),
+                                  [line for line in surface.axes.lines if line.get_gid() != "source-polyline"]))
+            with patch.object(app, "_start_preview_generation") as generate:
+                app.input_polylines_checkbutton.invoke()
+                self.assertFalse(app.input_polylines_var.get())
+                self.assertNotIn("selected", app._fullscreen_input_polylines_checkbutton.state())
+                for surface, xlim, ylim, boundaries in snapshots:
+                    overlays = [artist for artist in (*surface.axes.lines, *surface.axes.texts)
+                                if artist.get_gid() in {"source-polyline", "source-direction-arrow"}]
+                    self.assertTrue(overlays)
+                    self.assertTrue(all(not artist.get_visible() for artist in overlays))
+                    self.assertTrue(all(line in surface.axes.lines and line.get_visible() for line in boundaries))
+                    self.assertEqual(surface.axes.get_xlim(), xlim)
+                    self.assertEqual(surface.axes.get_ylim(), ylim)
+                for key in (app.preview_key_content, app._fullscreen_key_content):
+                    self.assertNotIn("Source polylines", [child.cget("text") for child in key.winfo_children()
+                                                         if isinstance(child, gui_module.ttk.Label)])
+                self.assertIs(app._cached_result, result)
+                self.assertFalse(app._preview_stale)
+                generate.assert_not_called()
+            # Rebuilding the preview and reopening Inspector retain the layer choice.
+            app._close_fullscreen_preview()
+            app._draw_preview(result)
+            app._open_fullscreen_preview()
+            self.assertFalse(next(line for line in app._fullscreen_axes.lines
+                                  if line.get_gid() == "source-polyline").get_visible())
+            app._fullscreen_input_polylines_checkbutton.invoke()
+            self.assertTrue(app.input_polylines_var.get())
+            for surface in app._active_map_surfaces():
+                self.assertTrue(all(artist.get_visible() for artist in (*surface.axes.lines, *surface.axes.texts)
+                                    if artist.get_gid() in {"source-polyline", "source-direction-arrow"}))
+            # Polygon/JPG inputs have no source-line layer to switch.
+            app._draw_preview(_sample_boundary_result())
+            self.assertIn("disabled", app.input_polylines_checkbutton.state())
+            self.assertIn("disabled", app._fullscreen_input_polylines_checkbutton.state())
+            app._draw_empty_preview()
+            self.assertIn("disabled", app.input_polylines_checkbutton.state())
 
     def test_loading_folder_starts_zero_buffer_auto_preview(self) -> None:
         with TemporaryDirectory() as tmp, _app() as app, patch.object(app, "_start_preview_generation") as start:
@@ -2462,12 +2516,15 @@ class GuiInputTests(TestCase):
                         self.assertLessEqual(bbox.y1, figure_bbox.y1 + 1.0)
                         scale_bbox = _scale_artist_bbox(surface, renderer)
                         self.assertFalse(_bboxes_intersect(bbox, scale_bbox))
+                        panel_bbox = artist.get_bbox_patch().get_window_extent(renderer=renderer)
+                        self.assertFalse(_bboxes_intersect(panel_bbox, scale_bbox))
                         self.assertEqual(len(surface.axes.images), 1)
                         if overlay is not None:
                             self.assertLessEqual(
                                 bbox.x1,
                                 overlay.winfo_x() - 1.0,
                             )
+                            self.assertLessEqual(panel_bbox.x1, overlay.winfo_x() - 1.0)
 
             app._toggle_settings_drawer()
             app.root.update()

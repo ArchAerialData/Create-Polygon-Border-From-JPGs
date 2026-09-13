@@ -4,6 +4,8 @@ import contextlib
 import html
 import io
 import math
+import os
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
@@ -50,6 +52,10 @@ from polyline_boundary import (
     build_per_side_polyline_boundary,
 )
 from section_ordering import order_parts_for_human_view
+from section_quality import (
+    MAX_AUTO_CUT_WIDTH_RATIO, MIN_AUTO_CROSSING_ANGLE_DEG,
+    cut_width_ratio, introduced_cut_length, minimum_crossing_angle,
+)
 
 
 FEET_PER_METER = 3.280839895
@@ -61,7 +67,7 @@ BUFFER_QUAD_SEGS = DEFAULT_BUFFER_QUAD_SEGS
 BUFFER_MITRE_LIMIT = 3.0
 MAX_SECTION_COUNT = 100
 ACRES_PER_SQUARE_METER = 0.000247105381467
-KML_LINE_WIDTH = 6.0
+KML_LINE_WIDTH = 5.0
 VECTOR_SIMPLIFY_MAX_DEVIATION_FT = 5.0
 VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO = 0.01
 VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 14
@@ -210,16 +216,13 @@ def generate_boundary(
     outline_mode: str = OUTLINE_MODE_AUTO,
     split_direction_deg: float | None = None,
 ) -> BoundaryResult:
-    if buffer_ft < 0:
-        raise BoundaryError("Buffer distance must be 0 or greater.")
+    if not math.isfinite(buffer_ft) or buffer_ft < 0:
+        raise BoundaryError("Buffer distance must be finite and 0 or greater.")
     if not 0 <= concave_ratio <= 1:
         raise BoundaryError("Concave hull ratio must be between 0 and 1.")
-    if simplify_factor < 0:
-        raise BoundaryError("Simplify factor must be 0 or greater.")
-    if section_count < 1 or section_count > MAX_SECTION_COUNT:
-        raise BoundaryError(f"# of Shapes must be between 1 and {MAX_SECTION_COUNT}.")
-    if overlap_ft < 0:
-        raise BoundaryError("Overlap distance must be 0 or greater.")
+    if not math.isfinite(simplify_factor) or simplify_factor < 0:
+        raise BoundaryError("Simplify factor must be finite and 0 or greater.")
+    _validate_section_settings(section_count, overlap_ft, split_direction_deg)
     if outline_mode not in OUTLINE_MODES:
         raise BoundaryError(f"Unknown outline mode: {outline_mode}")
 
@@ -491,10 +494,7 @@ def generate_boundary_from_vector_geometry(
         buffer_ft = settings.unified_ft
     if buffer_ft < 0:
         raise BoundaryError("Buffer distance must be 0 or greater.")
-    if section_count < 1 or section_count > MAX_SECTION_COUNT:
-        raise BoundaryError(f"# of Shapes must be between 1 and {MAX_SECTION_COUNT}.")
-    if overlap_ft < 0:
-        raise BoundaryError("Overlap distance must be 0 or greater.")
+    _validate_section_settings(section_count, overlap_ft, split_direction_deg)
     generation_profile = _validate_generation_profile(generation_profile)
 
     if vector_geometry.lines_wgs84:
@@ -862,6 +862,16 @@ def detect_utm_epsg(lats: np.ndarray, lons: np.ndarray) -> int:
     return (32600 if avg_lat >= 0 else 32700) + zone
 
 
+def _validate_section_settings(section_count: int, overlap_ft: float, split_direction_deg: float | None) -> None:
+    if (isinstance(section_count, bool) or not isinstance(section_count, (int, np.integer))
+            or not 1 <= section_count <= MAX_SECTION_COUNT):
+        raise BoundaryError(f"# of Shapes must be a whole number between 1 and {MAX_SECTION_COUNT}.")
+    if not math.isfinite(overlap_ft) or overlap_ft < 0:
+        raise BoundaryError("Overlap distance must be finite and 0 or greater.")
+    if split_direction_deg is not None and not math.isfinite(split_direction_deg):
+        raise BoundaryError("Split direction must be finite.")
+
+
 def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
     if result.metadata.generation_profile != GENERATION_PROFILE_EXPORT:
         raise BoundaryError(
@@ -895,7 +905,15 @@ def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
         polygon.description = _build_kml_description(result.metadata)
         _style_polygon(polygon, 0)
 
-    kml.savekmz(str(output_path))
+    # Finish writing beside the destination before replacing an existing export.
+    # Closing the handle first also lets ZipFile reopen it on Windows.
+    with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".boundary-", suffix=".kmz", delete=False) as pending:
+        temporary_path = Path(pending.name)
+    try:
+        kml.savekmz(str(temporary_path))
+        os.replace(temporary_path, output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return output_path
 
 
@@ -1217,6 +1235,20 @@ def _simplify_vector_sections(
             )
         )
         stats.append(section_stats)
+    if any(stat.after_vertices < stat.before_vertices for stat in stats):
+        # Independent simplification can move opposite sides of a shared cut
+        # differently, even when each polygon passes its own deviation/area
+        # checks. Permit the usual outer-edge tolerance, but no new interior
+        # gaps. Keep the original partition if the simplified set loses coverage.
+        original_union = unary_union([section.polygon_projected for section in sections])
+        required_interior = original_union.buffer(
+            -VECTOR_SIMPLIFY_MAX_DEVIATION_FT * METERS_PER_FOOT
+        )
+        simplified_union = unary_union(
+            [section.polygon_projected for section in simplified_sections]
+        )
+        if required_interior.difference(simplified_union.buffer(2e-6)).area > 1e-6:
+            return sections, _unsimplified_vector_section_stats(sections)
     return simplified_sections, _combine_vector_simplification_stats(stats)
 
 
@@ -1362,37 +1394,42 @@ def _partition_connected_polygon(
     polygon: Polygon,
     target_count: int,
 ) -> tuple[list[Polygon], list[float]]:
-    # Prefer exact areas, then allow the same 20% variance as natural sections.
+    # Prefer short cross-cuts over long, equal-area slices down a corridor.
     # Keep every leaf within the ORIGINAL target area, avoiding cumulative drift
-    # through recursive cuts. Work limits bound backtracking on complex networks.
+    # through recursive cuts. Try nearby allocations at each node before
+    # backtracking, so exact equality cannot force an irregular crop downstream.
     target_area = polygon.area / target_count
     remaining_attempts = 0
-    allow_imbalance = False
+    area_tolerance = 0.20
 
     def partition(part: Polygon, count: int) -> tuple[list[Polygon], list[float]] | None:
         nonlocal remaining_attempts
         if count == 1:
-            if abs(part.area / target_area - 1.0) <= 0.20 + 1e-6:
+            if abs(part.area / target_area - 1.0) <= area_tolerance + 1e-6:
                 return [part], []
             return None
         if remaining_attempts <= 0:
             return None
         remaining_attempts -= 1
         balanced = count // 2
-        allocations = list(dict.fromkeys((balanced, count - balanced, 1, count - 1)))
+        # Finish an end/branch section first. Repeatedly forcing a network into
+        # halves can exhaust the search before trying these clean cross-cuts.
+        allocations = list(dict.fromkeys((1, count - 1, balanced, count - balanced)))
         for left_count in allocations:
             fraction = left_count / count
-            factors = (1.0, 0.95, 1.05, 0.9, 1.1, 0.8, 1.2) if allow_imbalance else (1.0,)
-            for factor in factors:
-                left_fraction = fraction * factor
-                left_area = part.area * left_fraction
-                right_area = part.area - left_area
-                if not (
-                    0.8 - 1e-6 <= left_area / (left_count * target_area) <= 1.2 + 1e-6
-                    and 0.8 - 1e-6 <= right_area / ((count - left_count) * target_area) <= 1.2 + 1e-6
+            right_count = count - left_count
+            low = max(
+                (1.0 - area_tolerance) * left_count * target_area / part.area,
+                1.0 - (1.0 + area_tolerance) * right_count * target_area / part.area,
+            )
+            high = min(
+                (1.0 + area_tolerance) * left_count * target_area / part.area,
+                1.0 - (1.0 - area_tolerance) * right_count * target_area / part.area,
+            )
+            for bounds in (None, (low, high)):
+                for left, right, angle in _connected_cut_candidates(
+                    part, fraction, fraction_bounds=bounds,
                 ):
-                    continue
-                for left, right, angle in _connected_cut_candidates(part, left_fraction):
                     if remaining_attempts <= 0:
                         return None
                     remaining_attempts -= 1
@@ -1407,55 +1444,96 @@ def _partition_connected_polygon(
                         )
         return None
 
-    for allow_imbalance in (False, True):
-        remaining_attempts = max(32, min(512, target_count * 8))
+    # Keep the usual balance where feasible. At a bend, a moderately larger
+    # crop is preferable to a pointed end or an unusable partition. Each pass
+    # has its own bounded search budget and still uses the original mean area.
+    for area_tolerance in (0.20, 0.35):
+        remaining_attempts = max(64, min(1024, target_count * 24))
         result = partition(polygon, target_count)
         if result is not None:
             return result
     raise BoundaryError(
-        "Could not split the outline into the requested number of connected "
-        "sections within the Auto search limit. Try fewer shapes or a custom direction."
+        "Auto could not find connected crop sections with short cross-cuts and "
+        "areas within 35% of average. Try fewer shapes or choose a custom split direction."
     )
 
 
 def _connected_cut_candidates(
-    polygon: Polygon, left_fraction: float,
+    polygon: Polygon,
+    left_fraction: float,
+    *,
+    fraction_bounds: tuple[float, float] | None = None,
 ) -> Iterable[tuple[Polygon, Polygon, float]]:
-    coords = np.array(polygon.exterior.coords[:-1])
-    center = tuple(coords.mean(axis=0))
-    primary_angles = _candidate_split_angles(polygon)
-    # Search finer directions only if the primary cuts cannot finish a partition.
-    fine_angles = [
-        float(angle) for angle in range(0, 180, 5)
-        if all(abs(angle - existing) > 1e-6 for existing in primary_angles)
-    ]
-    for angles in (primary_angles, fine_angles):
-        candidates = []
-        for priority, angle in enumerate(angles):
-            rotated = rotate(polygon, -angle, origin=center, use_radians=False)
-            minx, miny, maxx, maxy = rotated.bounds
-            margin = max(maxx - minx, maxy - miny) * 2.0
-            cut_x = _find_equal_area_x(
-                rotated, minx - margin, maxx + margin,
-                miny - margin, maxy + margin, rotated.area * left_fraction,
-            )
-            left_rotated = _strict_single_polygon(
-                rotated.intersection(box(minx - margin, miny - margin, cut_x, maxy + margin))
-            )
+    center = (polygon.centroid.x, polygon.centroid.y)
+    angles = _candidate_split_angles(polygon)
+    for angle in range(0, 180, 5):
+        _append_unique_angle(angles, float(angle))
+    # This outline supplies SEARCH POSITIONS only. Every accepted cut clips the
+    # original polygon, so simplification cannot change the exported footprint.
+    width_scale = 2.0 * polygon.area / polygon.length
+    landmarks = (
+        polygon.simplify(width_scale * 0.05, preserve_topology=True)
+        if fraction_bounds is not None else None
+    )
+    candidates = []
+    for priority, angle in enumerate(angles):
+        rotated = rotate(polygon, -angle, origin=center, use_radians=False)
+        minx, miny, maxx, maxy = rotated.bounds
+        margin = max(maxx - minx, maxy - miny) * 2.0
+        cut_x = _find_equal_area_x(
+            rotated, minx - margin, maxx + margin,
+            miny - margin, maxy + margin, rotated.area * left_fraction,
+        )
+        positions = [cut_x]
+        if landmarks is not None:
+            landmark_xs = sorted({
+                x for x, _y in rotate(landmarks, -angle, origin=center).exterior.coords
+            })
+            # Midpoints and positions just inside each bend find narrow feasible
+            # windows that fixed 5% area steps can jump over completely.
+            inset = width_scale * 0.05
+            positions.extend((a + b) / 2.0 for a, b in zip(landmark_xs, landmark_xs[1:]))
+            positions.extend(x + shift for x in landmark_xs for shift in (-inset, inset))
+            positions = sorted(
+                {x for x in positions if minx < x < maxx},
+                key=lambda x: abs(x - cut_x),
+            )[:256]
+        angle_candidates = []
+        for position in positions:
+            left_geometry = rotated.intersection(box(minx - margin, miny - margin, position, maxy + margin))
+            actual_fraction = left_geometry.area / polygon.area
+            area_error = abs(actual_fraction - left_fraction)
+            if fraction_bounds is not None and (
+                not fraction_bounds[0] - 1e-8 <= actual_fraction <= fraction_bounds[1] + 1e-8
+                or area_error < 1e-8
+            ):
+                continue
+            left_rotated = _strict_single_polygon(left_geometry)
+            if left_rotated is None:
+                continue
             right_rotated = _strict_single_polygon(
-                rotated.intersection(box(cut_x, miny - margin, maxx + margin, maxy + margin))
+                rotated.intersection(box(position, miny - margin, maxx + margin, maxy + margin))
             )
-            if left_rotated is None or right_rotated is None:
+            if right_rotated is None:
+                continue
+            quality = cut_width_ratio(
+                rotated, introduced_cut_length(rotated, (left_rotated, right_rotated))
+            )
+            if quality > MAX_AUTO_CUT_WIDTH_RATIO:
+                continue
+            seam = rotated.intersection(LineString([
+                (position, miny - margin), (position, maxy + margin),
+            ]))
+            if minimum_crossing_angle(rotated, seam) < MIN_AUTO_CROSSING_ANGLE_DEG - 1e-6:
                 continue
             left = _strict_single_polygon(rotate(left_rotated, angle, origin=center))
             right = _strict_single_polygon(rotate(right_rotated, angle, origin=center))
             if left is None or right is None:
                 continue
-            area_error = abs(left.area / polygon.area - left_fraction)
-            vertex_count = len(left.exterior.coords) + len(right.exterior.coords)
-            candidates.append((area_error, vertex_count, priority, angle, left, right))
-        for candidate in sorted(candidates, key=lambda item: item[:3]):
-            yield candidate[4], candidate[5], candidate[3]
+            angle_candidates.append((round(quality, 6), round(area_error, 8), priority, angle, left, right))
+        candidates.extend(sorted(angle_candidates, key=lambda item: item[:3])[:4])
+    for candidate in sorted(candidates, key=lambda item: item[:3]):
+        yield candidate[4], candidate[5], candidate[3]
 
 
 def _candidate_split_angles(polygon: Polygon) -> list[float]:
@@ -1532,6 +1610,13 @@ def _format_split_strategy(split_angles: list[float], *, area_variance_pct: floa
 
 
 def _polygon_to_kml_coords(polygon: Polygon) -> list[tuple[float, float, int]]:
+    if not isinstance(polygon, Polygon) or polygon.is_empty or not polygon.is_valid or polygon.interiors:
+        raise BoundaryError("KMZ export requires a valid, exterior-only WGS84 polygon.")
+    if any(
+        not math.isfinite(lon) or not math.isfinite(lat) or not -180 <= lon <= 180 or not -90 <= lat <= 90
+        for lon, lat in polygon.exterior.coords
+    ):
+        raise BoundaryError("KMZ export coordinates must be finite WGS84 longitude/latitude degrees.")
     return [(lon, lat, 0) for lon, lat in polygon.exterior.coords]
 
 
@@ -1552,8 +1637,9 @@ def _style_polygon(polygon, color_index: int) -> None:
     polygon.style.linestyle.color = simplekml.Color.rgb(red, green, blue)
     polygon.style.linestyle.width = KML_LINE_WIDTH
     polygon.style.polystyle.color = simplekml.Color.rgb(red, green, blue, 45)
-    polygon.style.polystyle.fill = 1
+    polygon.style.polystyle.fill = 0
     polygon.style.polystyle.outline = 1
+    polygon.altitudemode = simplekml.AltitudeMode.clamptoground
 
 
 def _input_type_label(input_kind: str) -> str:
@@ -1919,6 +2005,7 @@ def _build_kml_description(
         f"Input type: {metadata.input_type}",
         f"Source input: {metadata.source_folder}",
         f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
+        "Export CRS: WGS84 (EPSG:4326), longitude/latitude degrees.",
         "Buffer distance: " + buffer_settings_from_metadata(metadata).description,
         f"Output polygon vertices: {metadata.vertex_count:,}",
     ]

@@ -94,6 +94,9 @@ OUTLINE_MODE_SOURCE_POLYGON = "source_polygon"
 PREVIEW_SCROLL_ZOOM_FACTOR = 1.2
 PREVIEW_MAX_PLOT_POINTS = 2500
 PREVIEW_LIMIT_PADDING_RATIO = 0.04
+# Reserved for imported linework; section outlines use the colored palette below.
+PREVIEW_SOURCE_LINE_COLOR = "#ffffff"
+PREVIEW_SOURCE_LINE_WIDTH = 2.0
 PREVIEW_KEY_PANEL_WIDTH = 340
 PREVIEW_KEY_WRAP_LENGTH = 270
 ACTION_BAR_MIN_BREAKPOINT = 680
@@ -133,6 +136,7 @@ class _PreviewMapSurface:
     debounce_after_id: str | None
     last_submitted_signature: tuple[object, ...] | None
     last_applied_signature: tuple[object, ...] | None
+    key_entries: tuple[tuple[str, str, str, float], ...] = ()
 
 
 _BufferValue = float | BufferSettings
@@ -146,6 +150,7 @@ class _GeometryRequest:
     input_path: Path
     identity: tuple[str, int, int] | None
     buffer: BufferSettings
+    control_signature: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -167,11 +172,11 @@ class BoundaryKmzApp:
         self._theme_style = apply_gui_theme(self.root)
 
         default_output_path = self._default_output_path()
-        self.parent_var = tk.StringVar()
-        self.buffer_var = tk.StringVar(value="0")
-        self.per_side_var = tk.BooleanVar(value=False)
-        self.left_buffer_var = tk.StringVar(value="")
-        self.right_buffer_var = tk.StringVar(value="")
+        self.parent_var = tk.StringVar(master=self.root)
+        self.buffer_var = tk.StringVar(master=self.root, value="0")
+        self.per_side_var = tk.BooleanVar(master=self.root, value=False)
+        self.left_buffer_var = tk.StringVar(master=self.root, value="")
+        self.right_buffer_var = tk.StringVar(master=self.root, value="")
         self._updating_buffer_mode = False
         self._compatibility: PolylineCompatibility | None = None
         self._compatibility_identity = None
@@ -180,20 +185,24 @@ class BoundaryKmzApp:
         self._active_request: _GeometryRequest | None = None
         self._cached_source_identity = None
         self._buffer_layout_after_id = None
-        self.output_name_var = tk.StringVar(value=default_output_path.stem)
-        self.output_var = tk.StringVar(value=str(default_output_path))
-        self.outline_mode_var = tk.StringVar(value="Auto")
-        self.section_count_var = tk.StringVar(value="1")
-        self.overlap_var = tk.StringVar(value="50")
-        self.shape_label_var = tk.StringVar(value=self._default_shape_label())
-        self.split_direction_var = tk.StringVar(value="Auto")
-        self.split_direction_degrees_var = tk.StringVar(value="")
-        self.simplify_vector_var = tk.BooleanVar(value=True)
-        self.world_imagery_var = tk.BooleanVar(value=True)
-        self.imagery_status_var = tk.StringVar(value="")
-        self.status_var = tk.StringVar(value="Choose a JPG folder, KML, or KMZ file to begin.")
-        self.preview_state_var = tk.StringVar(value="No preview")
-        self.input_summary_var = tk.StringVar(value="No input selected")
+        self._attribution_layout_after_id = None
+        self._attribution_bands: dict[str, int] = {}
+        self._queue_after_id = None
+        self.output_name_var = tk.StringVar(master=self.root, value=default_output_path.stem)
+        self.output_var = tk.StringVar(master=self.root, value=str(default_output_path))
+        self.outline_mode_var = tk.StringVar(master=self.root, value="Auto")
+        self.section_count_var = tk.StringVar(master=self.root, value="1")
+        self.overlap_var = tk.StringVar(master=self.root, value="50")
+        self.shape_label_var = tk.StringVar(master=self.root, value=self._default_shape_label())
+        self.split_direction_var = tk.StringVar(master=self.root, value="Auto")
+        self.split_direction_degrees_var = tk.StringVar(master=self.root, value="")
+        self.simplify_vector_var = tk.BooleanVar(master=self.root, value=True)
+        self.world_imagery_var = tk.BooleanVar(master=self.root, value=True)
+        self.input_polylines_var = tk.BooleanVar(master=self.root, value=True)
+        self.imagery_status_var = tk.StringVar(master=self.root, value="")
+        self.status_var = tk.StringVar(master=self.root, value="Choose a JPG folder, KML, or KMZ file to begin.")
+        self.preview_state_var = tk.StringVar(master=self.root, value="No preview")
+        self.input_summary_var = tk.StringVar(master=self.root, value="No input selected")
         self._updating_output_fields = False
         self._updating_shape_label = False
         self._shape_label_touched = False
@@ -274,6 +283,7 @@ class BoundaryKmzApp:
         self._fullscreen_canvas: FigureCanvasTkAgg | None = None
         self._fullscreen_toolbar: NavigationToolbar2Tk | None = None
         self._fullscreen_imagery_checkbutton: ttk.Checkbutton | None = None
+        self._fullscreen_input_polylines_checkbutton: ttk.Checkbutton | None = None
         self._fullscreen_imagery_status_label: ttk.Label | None = None
         self._fullscreen_key_frame: ttk.LabelFrame | None = None
         self._fullscreen_key_canvas: tk.Canvas | None = None
@@ -309,6 +319,7 @@ class BoundaryKmzApp:
         self.left_buffer_var.trace_add("write", self._on_side_buffer_changed)
         self.right_buffer_var.trace_add("write", self._on_side_buffer_changed)
         self.world_imagery_var.trace_add("write", self._on_world_imagery_toggled)
+        self.input_polylines_var.trace_add("write", self._on_input_polylines_toggled)
         self._update_outline_mode_state()
         self._update_section_control_state()
         self._refresh_input_shell_state()
@@ -318,10 +329,10 @@ class BoundaryKmzApp:
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.root.bind("<Button-1>", self._dismiss_view_menu, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown_basemap)
-        self.root.after(100, self._drain_queue)
+        self._queue_after_id = self.root.after(100, self._drain_queue)
 
     def _build_ui(self) -> None:
-        self.root_frame = ttk.Frame(self.root, style="App.TFrame", padding=16)
+        self.root_frame = ttk.Frame(self.root, style="App.TFrame", padding=12)
         self.root_frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -337,9 +348,9 @@ class BoundaryKmzApp:
         self.header_frame = ttk.Frame(
             parent, style="Card.TFrame",
         )
-        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.header_frame.columnconfigure(0, weight=1)
-        self.brand_frame = ttk.Frame(self.header_frame, style="Brand.TFrame", padding=(18, 12))
+        self.brand_frame = ttk.Frame(self.header_frame, style="Brand.TFrame", padding=(14, 5))
         self.brand_frame.grid(row=0, column=0, sticky="ew")
         self.brand_frame.columnconfigure(0, weight=1)
         self.brand_caption = ttk.Label(self.brand_frame, text="ARCH AERIAL  /  MAPPING TOOLS",
@@ -354,13 +365,18 @@ class BoundaryKmzApp:
             style="Brand.Caption.TLabel",
         )
         self.workflow_label.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
-        self.source_strip = ttk.Frame(self.header_frame, style="Card.TFrame", padding=(12, 10))
+        self.new_input_button = ttk.Button(
+            self.brand_frame, text="New input", style="Secondary.TButton",
+            command=self._return_to_import,
+        )
+        self.new_input_button.grid(row=0, column=3, padx=(14, 0), sticky="e")
+        self.source_strip = ttk.Frame(self.header_frame, style="Card.TFrame", padding=(12, 5))
         self.source_strip.grid(row=1, column=0, sticky="ew")
         self.source_strip.columnconfigure(0, weight=1)
         self.compact_input_target = tk.Label(
             self.source_strip,
             textvariable=self.input_summary_var,
-            anchor="w", width=1, padx=10, pady=8, cursor="hand2",
+            anchor="w", width=1, padx=10, pady=6, cursor="hand2",
             font=("Segoe UI", 10), background=PALETTE.BACKGROUND,
             foreground=PALETTE.TEXT, highlightthickness=1,
         )
@@ -381,6 +397,7 @@ class BoundaryKmzApp:
         self.change_input_button.menu.add_command(label="Choose JPG folder…", command=self._browse_parent)
         self.change_input_button.menu.add_command(label="Choose KML or KMZ…", command=self._browse_kmz)
         self.change_input_button.menu.add_separator()
+        self.change_input_button.menu.add_command(label="Return to import screen", command=self._return_to_import)
         self.change_input_button.menu.add_command(label="Edit input path…", command=self._open_input_settings,
                                                   accelerator="Ctrl+L")
         self.change_input_button.grid(row=0, column=0, padx=(0, 6))
@@ -456,6 +473,11 @@ class BoundaryKmzApp:
             style="Surface.TCheckbutton",
         )
         self.world_imagery_checkbutton.grid(row=0, column=0, sticky="e")
+        self.input_polylines_checkbutton = ttk.Checkbutton(
+            self.preview_view_controls, text="Input polylines",
+            variable=self.input_polylines_var, style="Surface.TCheckbutton", state="disabled",
+        )
+        self.input_polylines_checkbutton.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.imagery_status_label = ttk.Label(
             self.preview_view_controls,
             textvariable=self.imagery_status_var,
@@ -463,7 +485,7 @@ class BoundaryKmzApp:
             anchor="e",
             width=20,
         )
-        self.imagery_status_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.imagery_status_label.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         self._main_map_surface = self._create_preview_map_surface(
             "main",
@@ -596,6 +618,7 @@ class BoundaryKmzApp:
         surface.last_submitted_signature = None
         surface.last_applied_signature = None
         surface.status_var.set("")
+        surface.key_entries = ()
         self._surface_draw_guards.discard(surface.surface_id)
         self._surface_copyright_text.pop(surface.surface_id, None)
         self._surface_applied_status.pop(surface.surface_id, None)
@@ -616,6 +639,29 @@ class BoundaryKmzApp:
         elif not changed:
             self._surface_draw_guards.discard(surface.surface_id)
         self._schedule_basemap_refresh(surface)
+
+    def _on_input_polylines_toggled(self, *_args: object) -> None:
+        if self._closing:
+            return
+        visible = bool(self.input_polylines_var.get())
+        for surface in self._active_map_surfaces():
+            for artist in (*surface.axes.lines, *surface.axes.texts):
+                if artist.get_gid() in {"source-polyline", "source-direction-arrow"}:
+                    artist.set_visible(visible)
+            key_content = (getattr(self, "preview_key_content", None)
+                           if surface is self._main_map_surface else self._fullscreen_key_content)
+            self._update_preview_key(key_content, surface.key_entries)
+            surface.canvas.draw_idle()
+
+    def _refresh_input_polyline_controls(self) -> None:
+        for surface, checkbox in (
+            (self._main_map_surface, getattr(self, "input_polylines_checkbutton", None)),
+            (self._fullscreen_map_surface, self._fullscreen_input_polylines_checkbutton),
+        ):
+            if checkbox is not None:
+                has_lines = surface is not None and any(
+                    line.get_gid() == "source-polyline" for line in surface.axes.lines)
+                checkbox.configure(state="normal" if has_lines else "disabled")
 
     def _on_world_imagery_toggled(self, *_args: object) -> None:
         if self._closing:
@@ -964,6 +1010,7 @@ class BoundaryKmzApp:
             except (AttributeError, ValueError):
                 pass
         surface.attribution_artist = None
+        self._set_attribution_band(surface, 0)
         self._surface_copyright_text.pop(surface.surface_id, None)
         self._surface_applied_status.pop(surface.surface_id, None)
 
@@ -983,8 +1030,9 @@ class BoundaryKmzApp:
             )
         )
         if not provider_text or not image_attached:
+            band_changed = self._set_attribution_band(surface, 0)
             if surface.attribution_artist is None:
-                return False
+                return band_changed
             try:
                 surface.attribution_artist.remove()
             except (AttributeError, ValueError):
@@ -1027,41 +1075,101 @@ class BoundaryKmzApp:
             created = True
 
         full_text = f"Powered by Esri | {provider_text}"
+        artist = surface.attribution_artist
+        axes_bbox = surface.axes.get_window_extent()
+        # Pixel padding stays predictable on small canvases and at export DPI.
+        # Percentage padding previously wasted enough width to add whole lines.
+        box_pad = artist.get_fontsize() * surface.figure.dpi / 72.0 * 0.35
+        inset = box_pad + 6.0 * surface.figure.dpi / 100.0
+        position = (inset / max(axes_bbox.width, 1),
+                    1.0 - (box_pad + 2.0 * surface.figure.dpi / 100.0) / max(axes_bbox.height, 1))
+        moved = artist.get_position() != position
+        artist.set_position(position)
         previous_text = surface.attribution_artist.get_text()
-        wrapped = self._wrap_attribution_text(
-            surface,
-            surface.attribution_artist,
-            full_text,
-        )
+        wrapped = self._wrap_attribution_text(surface, artist, full_text)
+        artist.set_text(wrapped)
+        renderer = surface.figure.canvas.get_renderer()
+        scale_top = max((item.get_window_extent(renderer).y1 for item in surface.axes.get_children()
+                         if str(item.get_gid() or "").startswith("jpg-boundary-scale-")), default=axes_bbox.y0)
+        available_height = axes_bbox.y1 - scale_top - 2 * box_pad - 4 * surface.figure.dpi / 100
+        band = 0
+        inspector = surface.surface_id.startswith("inspector:")
+        if artist.get_window_extent(renderer).height > available_height and (
+                inspector or self._settings_drawer_open or self._legend_open):
+            widget = surface.canvas.get_tk_widget()
+            pixel_scale = axes_bbox.width / max(1, widget.winfo_width())
+            full_width = (widget.master.winfo_width() * pixel_scale if inspector else axes_bbox.width)
+            wide_text = self._wrap_attribution_text(surface, artist, full_text, available_width=full_width)
+            artist.set_text(wide_text)
+            if artist.get_window_extent(renderer).height <= available_height:
+                wrapped = wide_text
+                band = math.ceil((artist.get_window_extent(renderer).height + 2 * box_pad + 8) / pixel_scale)
+        band_changed = self._set_attribution_band(surface, band)
         surface.attribution_artist.set_text(previous_text)
         changed = previous_text != wrapped
         if changed:
             surface.attribution_artist.set_text(wrapped)
-        return created or changed
+        return created or changed or moved or band_changed
+
+    def _set_attribution_band(self, surface: _PreviewMapSurface, height: int) -> bool:
+        """Let overflowing credits span above an open panel without shrinking text."""
+        if self._attribution_bands.get(surface.surface_id, 0) == height:
+            return False
+        if height:
+            self._attribution_bands[surface.surface_id] = height
+        else:
+            self._attribution_bands.pop(surface.surface_id, None)
+        if surface.surface_id.startswith("inspector:"):
+            panel = self._fullscreen_key_frame
+            if panel is not None:
+                widget = surface.canvas.get_tk_widget()
+                if height:
+                    panel.grid_remove()
+                    widget.grid_configure(columnspan=2)
+                    panel.place(relx=1, x=-8, y=height, relheight=1, height=-height,
+                                width=panel.winfo_reqwidth(), anchor="ne")
+                else:
+                    panel.place_forget()
+                    widget.grid_configure(columnspan=1)
+                    panel.grid(row=0, column=1, sticky="ns", padx=(8, 8))
+        else:
+            for opened, panel in ((self._settings_drawer_open, self.settings_drawer),
+                                  (self._legend_open, self.preview_key_overlay)):
+                if opened:
+                    panel.place_configure(y=height, height=-height)
+        return True
 
     def _wrap_attribution_text(
         self,
         surface: _PreviewMapSurface,
         artist: object,
         text: str,
+        *,
+        available_width: float | None = None,
     ) -> str:
         try:
             axes_width = float(surface.axes.get_window_extent().width)
         except (AttributeError, TypeError, ValueError):
             axes_width = 640.0
-        reserved_width = (
-            0
-            if surface.surface_id.startswith("inspector:")
-            else max(
-                PREVIEW_KEY_PANEL_WIDTH + 28,
-                min(max(SETTINGS_DRAWER_WIDTH, self.settings_content.winfo_reqwidth() + 40),
-                    max(self.preview_stack.winfo_width() - 24, 300)),
-            ) + 24
-        )
-        max_width = max(
-            90.0,
-            axes_width - reserved_width - (axes_width * 0.03) - 18.0,
-        )
+        visible_width = axes_width
+        if surface.surface_id.startswith("inspector:"):
+            if self._attribution_bands.get(surface.surface_id, 0) and self._fullscreen_key_frame is not None:
+                widget = surface.canvas.get_tk_widget()
+                visible_width = (widget.master.winfo_width() - self._fullscreen_key_frame.winfo_reqwidth() - 16
+                                 ) * axes_width / max(1, widget.winfo_width())
+        else:
+            widget = surface.canvas.get_tk_widget()
+            pixel_scale = axes_width / max(1, widget.winfo_width())
+            for opened, overlay in ((self._settings_drawer_open, self.settings_drawer),
+                                    (self._legend_open, self.preview_key_overlay)):
+                if opened:
+                    visible_width = min(visible_width,
+                        (overlay.winfo_x() - widget.winfo_x()) * pixel_scale)
+        # Reserve only an open panel, including the attribution box's own padding.
+        inset = artist.get_position()[0] * axes_width
+        if available_width is not None:
+            visible_width = available_width
+        max_width = max(1.0, visible_width - 2 * inset)
         try:
             renderer = surface.figure.canvas.get_renderer()
         except (AttributeError, RuntimeError):
@@ -1112,9 +1220,15 @@ class BoundaryKmzApp:
         if self._closing:
             return
         self._closing = True
-        for after_id in (self._layout_after_id, self._busy_after_id):
+        if hasattr(self, "busy_progress"):
+            self.busy_progress.stop()
+        for after_id in (self._layout_after_id, self._busy_after_id, self._buffer_layout_after_id,
+                         self._attribution_layout_after_id, self._queue_after_id):
             if after_id is not None:
-                self.root.after_cancel(after_id)
+                try:
+                    self.root.after_cancel(after_id)
+                except tk.TclError:
+                    pass
         for tooltip in getattr(self, "_tooltips", []):
             tooltip.hide()
         if self._main_map_surface is not None:
@@ -1655,6 +1769,7 @@ class BoundaryKmzApp:
 
     def _populate_widget_state_registries(self) -> None:
         self._all_mutation_widgets = [
+            self.new_input_button,
             self.input_path_entry,
             self.buffer_entry,
             self.outline_mode_combo,
@@ -1761,6 +1876,8 @@ class BoundaryKmzApp:
             relx=1.0,
             rely=0.0,
             relheight=1.0,
+            y=self._attribution_bands.get("main", 0),
+            height=-self._attribution_bands.get("main", 0),
             width=width,
             anchor="ne",
         )
@@ -1773,6 +1890,17 @@ class BoundaryKmzApp:
             active = self._settings_drawer_open and key == self._active_settings_group
             button.configure(style="Primary.TButton" if active else "Ghost.TButton")
         self._place_empty_input_overlay()
+        self._queue_attribution_layout()
+
+    def _queue_attribution_layout(self) -> None:
+        if not self._closing and self._attribution_layout_after_id is None:
+            self._attribution_layout_after_id = self.root.after_idle(self._refresh_main_attribution_layout)
+
+    def _refresh_main_attribution_layout(self) -> None:
+        self._attribution_layout_after_id = None
+        if not self._closing and self._main_map_surface is not None:
+            if self._refresh_attribution_artist(self._main_map_surface):
+                self._main_map_surface.canvas.draw_idle()
 
     def _toggle_preview_key(self) -> None:
         self._close_view_menu()
@@ -1788,6 +1916,7 @@ class BoundaryKmzApp:
         self._legend_open = False
         if hasattr(self, "preview_key_overlay"):
             self.preview_key_overlay.place_forget()
+        self._queue_attribution_layout()
 
     def _place_preview_key(self) -> None:
         self.preview_stack.update_idletasks()
@@ -1797,9 +1926,12 @@ class BoundaryKmzApp:
             relx=1.0,
             rely=0.0,
             relheight=1.0,
+            y=self._attribution_bands.get("main", 0),
+            height=-self._attribution_bands.get("main", 0),
             width=width,
             anchor="ne",
         )
+        self._queue_attribution_layout()
 
     def _close_topmost_overlay(self) -> bool:
         if self._view_menu_open:
@@ -1913,34 +2045,57 @@ class BoundaryKmzApp:
             getattr(self, "_empty_full_height", 0), self.empty_input_overlay.winfo_reqheight()
         )
         short_preview = self.preview_stack.winfo_height() < max(300, self._empty_full_height + 16)
-        self.empty_input_overlay.configure(padding=(20, 6) if short_preview else (28, 24))
+        self.empty_input_overlay.configure(padding=(16, 4) if short_preview else (28, 24))
         self.drop_label.configure(pady=3 if short_preview else 22)
+        self.drop_label.grid_configure(pady=(0, 6 if short_preview else 12))
+        self.empty_title_label.grid_configure(pady=(0, 4 if short_preview else 12))
         self.empty_title_label.configure(
             text="Select input",
             font=("Segoe UI", 15 if short_preview else 20, "bold"),
         )
+        compact_card_height = (
+            8 + self.empty_title_label.winfo_reqheight() + 4
+            + self.drop_label.winfo_reqheight() + 6
+            + max(self.browse_folder_button.winfo_reqheight(), self.browse_vector_button.winfo_reqheight())
+        )
+        # Keep the actual import controls accessible even when a wrapped footer
+        # leaves very little map height. The heading is optional; browsing isn't.
+        if short_preview and self.preview_stack.winfo_height() < compact_card_height:
+            self.empty_title_label.grid_remove()
+        else:
+            self.empty_title_label.grid()
         if short_preview:
             self.empty_hint_label.grid_remove()
         else:
             self.empty_hint_label.grid()
         self._place_empty_input_overlay()
-        if hasattr(self, "imagery_status_label"):
-            # Keep navigation and the imagery checkbox available on narrow views.
-            if self.preview_toolbar_frame.winfo_width() < 720:
-                self.imagery_status_label.grid_remove()
-            else:
-                self.imagery_status_label.grid()
+        self._layout_preview_toolbar(self.preview_toolbar, self.preview_view_controls, self.imagery_status_label)
+
+    @staticmethod
+    def _layout_preview_toolbar(toolbar, controls, status_label) -> None:
+        """Keep both layer toggles together, moving them below navigation if needed."""
+        available = max(1, toolbar.master.winfo_width() - 32)
+        checkbox_width = sum(child.winfo_reqwidth() for child in controls.winfo_children()
+                             if child is not status_label) + 8
+        row_width = toolbar.winfo_reqwidth() + checkbox_width + 20
+        if row_width + status_label.winfo_reqwidth() + 8 <= available:
+            status_label.grid()
+        else:
+            status_label.grid_remove()
+        wrapped = row_width > available
+        toolbar.grid_configure(columnspan=2 if wrapped else 1)
+        controls.grid_configure(row=1 if wrapped else 0, column=0 if wrapped else 1,
+                                columnspan=2 if wrapped else 1)
 
     def _refresh_header_layout(self, width: int | None = None) -> None:
         if not hasattr(self, "header_actions"):
             return
         current_width = width or self.root.winfo_width()
-        short = self.root.winfo_height() < 700 or self._focus_mode
-        self.brand_frame.configure(padding=(18, 6 if short else 12))
-        if short:
+        self.brand_frame.configure(padding=(14, 5))
+        if current_width < 1200 or self._focus_mode:
             self.brand_caption.grid_remove()
         else:
-            self.brand_caption.grid()
+            self.brand_caption.grid(row=0, column=1, padx=(16, 0), sticky="e")
         buttons = (self.change_input_button, self.settings_button,
                    self.sections_settings_button, self.output_settings_button, self.view_button)
         action_width = sum(button.winfo_reqwidth() + 6 for button in buttons)
@@ -1963,12 +2118,15 @@ class BoundaryKmzApp:
             button.grid(row=row, column=column, padx=(0, button_gap), pady=(3 if row else 0, 0))
             used += requested
             column += 1
-        if current_width < 1040 or self._focus_mode:
+        brand_width = sum(widget.winfo_reqwidth() for widget in (
+            self.app_title_label, self.brand_caption, self.workflow_label, self.new_input_button,
+        )) + 120
+        if current_width < max(1600, brand_width) or self._focus_mode:
             self.workflow_label.grid_remove()
         else:
-            self.workflow_label.grid()
+            self.workflow_label.grid(row=0, column=2, rowspan=1, padx=(24, 0), sticky="e")
         if not self._focus_mode and self._focus_title_was_mapped:
-            self.app_title_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+            self.app_title_label.grid(row=0, column=0, sticky="w", pady=0)
         else:
             self.app_title_label.grid_remove()
 
@@ -1976,27 +2134,49 @@ class BoundaryKmzApp:
         if not hasattr(self, "action_left_group"):
             return
         self.root.update_idletasks()
+        current_width = width or self.root.winfo_width()
+        # Output names remain in Output settings and the saved status. Avoid an
+        # otherwise empty footer row just for a repeated filename.
+        self.export_destination_label.grid_remove()
+        buttons_width = sum(button.winfo_reqwidth() + 8 for button in (
+            self.details_button, self.scan_button, self.export_button,
+        )) + (self.busy_progress.winfo_reqwidth() + 8 if self._busy else 0)
+        saved_visible = self._last_export_path is not None and not self._busy
+        saved_width = self.open_export_button.winfo_reqwidth() + 8 if saved_visible else 0
+        saved_inline = current_width >= buttons_width + saved_width + 200
+        if saved_visible:
+            self.open_export_button.grid(
+                row=0 if saved_inline else 1, column=4 if saved_inline else 1,
+                columnspan=1 if saved_inline else 3, sticky="e",
+                padx=(8, 0) if saved_inline else 0, pady=0 if saved_inline else (4, 0),
+            )
+        else:
+            self.open_export_button.grid_remove()
+        right_width = buttons_width + (saved_width if saved_inline else 0)
         active_groups = self._active_quick_buffer_groups()
         for group in self._quick_field_groups:
             if group not in active_groups:
                 group.grid_remove()
         natural_width = sum(group.winfo_reqwidth() + 14 for group in active_groups)
         self._action_bar_breakpoint = max(
-            ACTION_BAR_MIN_BREAKPOINT, natural_width + self.action_right_group.winfo_reqwidth() + 48,
+            ACTION_BAR_MIN_BREAKPOINT, natural_width + right_width + 48,
         )
-        current_width = width or self.root.winfo_width()
         compact = current_width < self._action_bar_breakpoint
         self._action_bar_compact = compact
+        self._action_bar_inline = current_width >= natural_width + right_width + 360
         self.action_left_group.grid(row=0, column=0, sticky="ew")
-        self.action_right_group.grid(row=0, column=1, sticky="e", padx=(12, 0))
-        if compact:
+        self.action_right_group.grid(row=0, column=2 if self._action_bar_inline else 1,
+                                     sticky="e", padx=(12, 0))
+        self.action_right_group.lift()
+        if self._action_bar_inline:
+            self.quick_controls.grid(in_=self.action_bar, row=0, column=1, columnspan=1,
+                                     sticky="e", padx=(12, 0), pady=0)
+        elif compact:
             self.quick_controls.grid(in_=self.action_bar, row=1, column=0, columnspan=2,
-                                     sticky="w", pady=(4, 0))
-            self.export_destination_label.grid_remove()
+                                     sticky="w", padx=0, pady=(4, 0))
         else:
-            self.export_destination_label.grid()
             self.quick_controls.grid(in_=self.action_left_group, row=1, column=0, columnspan=8,
-                                     sticky="w", pady=(4, 0))
+                                     sticky="w", padx=0, pady=(4, 0))
         available = max(250, current_width - 48) if compact else natural_width
         if not hasattr(self, "_quick_control_rows"):
             self._quick_control_rows = []
@@ -2025,17 +2205,37 @@ class BoundaryKmzApp:
             path = self._path_from_text(text)
             kind = "KML / KMZ" if self._is_vector_file_path(path) else "JPG FOLDER"
             self.input_summary_var.set(f"{kind}  ·  {path.name or str(path)}")
-            if hasattr(self, "empty_input_overlay"):
-                self.empty_input_overlay.place_forget()
         else:
             self.input_summary_var.set("No input selected — drop or browse to begin")
-            if hasattr(self, "empty_input_overlay"):
-                self._place_empty_input_overlay()
+        self._place_empty_input_overlay()
+
+    def _return_to_import(self) -> None:
+        """Clear the current input and invalidate late worker responses."""
+        if self._busy:
+            return
+        self._active_request = None
+        self._loaded_input_text = ""
+        self._close_fullscreen_preview()
+        self._close_settings_drawer()
+        self._close_preview_key()
+        self._close_view_menu()
+        self.parent_var.set("")
+        self._reset_per_side_input()
+        self._invalidate_cache()
+        self._clear_preview_for_input_change()
+        self.buffer_var.set("0")
+        self.section_count_var.set("1")
+        self._last_export_path = None
+        self._write_status("")
+        self._set_busy(False, "Choose a JPG folder, KML, or KMZ file to begin.")
+        self._place_empty_input_overlay()
+        self.browse_folder_button.focus_set()
 
     def _place_empty_input_overlay(self) -> None:
         if not hasattr(self, "empty_input_overlay"):
             return
-        if self.parent_var.get().strip():
+        failed_empty = self._preview_error and self._last_displayed_result is None
+        if self._busy or (self.parent_var.get().strip() and not failed_empty):
             self.empty_input_overlay.place_forget()
             return
         available = self.preview_stack.winfo_width()
@@ -3030,6 +3230,10 @@ class BoundaryKmzApp:
                 self._read_inputs(require_output=False)
             )
         except BoundaryError as error:
+            self._preview_error = str(error)
+            self.status_var.set(f"Error: {error}")
+            self._refresh_preview_state_badge()
+            self._refresh_input_shell_state()
             messagebox.showerror("Invalid input", str(error), parent=self.root)
             return
 
@@ -3147,7 +3351,7 @@ class BoundaryKmzApp:
         except OSError:
             identity = None
         request = _GeometryRequest(self._request_sequence, self._input_generation,
-                                   input_path, identity, settings)
+                                   input_path, identity, settings, self._preview_control_signature())
         self._active_request = request
         return request
 
@@ -3155,8 +3359,14 @@ class BoundaryKmzApp:
         # Worker-only path: no Tk variables, UI APIs, or extra parser process.
         path = request.input_path
         scalar = request.buffer.unified_ft if request.buffer.mode == "unified" else 0.0
-        if path.suffix.lower() in {".kml", ".kmz"}:
-            parsed = load_vector_input(path)
+        if not path.is_dir() and path.suffix.lower() in {".kml", ".kmz"}:
+            try:
+                parsed = load_vector_input(path)
+            except Exception as error:
+                # A same-path reload may fail before normal classification is possible.
+                self._queue.put(("compatibility", _WorkerMessage(request,
+                    PolylineCompatibility(False, "read_error", str(error)))))
+                raise
             if source_identity(path) != request.identity:
                 raise BoundaryError("Input changed while being read. Update Preview to reload it.")
             compatibility = classify_per_side_input(parsed)
@@ -3207,6 +3417,9 @@ class BoundaryKmzApp:
         self._queue.put(("export_done", _WorkerMessage(request, (result, saved_path))))
 
     def _drain_queue(self) -> None:
+        if self._queue_after_id is not None:
+            self.root.after_cancel(self._queue_after_id)
+            self._queue_after_id = None
         if self._closing:
             return
         while True:
@@ -3216,6 +3429,7 @@ class BoundaryKmzApp:
                 break
 
             identity = None
+            request = None
             if isinstance(payload, _WorkerMessage):
                 request = payload.request
                 if self._active_request is None or request.request_id != self._active_request.request_id:
@@ -3249,7 +3463,9 @@ class BoundaryKmzApp:
             if kind == "scan_done":
                 result = payload
                 assert isinstance(result, BoundaryResult)
-                self._sync_effective_buffer(result)
+                settings_match = request is None or request.control_signature == self._preview_control_signature()
+                if settings_match:
+                    self._sync_effective_buffer(result)
                 self._cached_result = result
                 self._cached_source_identity = identity
                 self._cached_settings = self._settings_key(
@@ -3266,7 +3482,7 @@ class BoundaryKmzApp:
                 self._write_status(format_summary(result.metadata))
                 self._draw_preview(result)
                 self._last_displayed_result = result
-                self._mark_preview_current()
+                self._mark_result_settings(request, settings_match)
                 self._set_busy(False, self._ready_status(result, "Preview ready."))
                 self._set_fullscreen_status(
                     self._ready_status(result, "Preview ready.")
@@ -3275,7 +3491,9 @@ class BoundaryKmzApp:
                 result, saved_path = payload
                 assert isinstance(result, BoundaryResult)
                 saved_path = Path(saved_path)
-                self._sync_effective_buffer(result)
+                settings_match = request is None or request.control_signature == self._preview_control_signature()
+                if settings_match:
+                    self._sync_effective_buffer(result)
                 self._cached_result = result
                 self._cached_source_identity = identity
                 self._cached_settings = self._settings_key(
@@ -3295,7 +3513,7 @@ class BoundaryKmzApp:
                 )
                 self._draw_preview(result)
                 self._last_displayed_result = result
-                self._mark_preview_current()
+                self._mark_result_settings(request, settings_match)
                 self._set_busy(False, self._ready_status(result, "KMZ exported."))
                 self._set_fullscreen_status(
                     self._ready_status(result, "KMZ exported.")
@@ -3315,7 +3533,14 @@ class BoundaryKmzApp:
                     parent=self.root,
                 )
 
-        self.root.after(100, self._drain_queue)
+        self._queue_after_id = self.root.after(100, self._drain_queue)
+
+    def _mark_result_settings(self, request: _GeometryRequest | None, settings_match: bool) -> None:
+        if settings_match:
+            self._mark_preview_current()
+        else:
+            self._last_displayed_signature = request.control_signature
+            self._mark_preview_stale("Settings changed during processing.")
 
     def _show_export_success(self, saved_path: Path) -> None:
         """Keep completion inline so the user can immediately continue editing."""
@@ -3384,8 +3609,8 @@ class BoundaryKmzApp:
                 overlap_ft = float(overlap_value_text)
             except ValueError as exc:
                 raise BoundaryError("Overlap must be a number in feet.") from exc
-            if overlap_ft < 0:
-                raise BoundaryError("Overlap must be 0 or greater.")
+            if not math.isfinite(overlap_ft) or overlap_ft < 0:
+                raise BoundaryError("Overlap must be finite and 0 or greater.")
 
         output_path: Path | None = None
         output_text = self.output_var.get().strip()
@@ -3497,18 +3722,21 @@ class BoundaryKmzApp:
                 # Keep separate features separate; never join their endpoints.
                 x, y = line.xy
                 source_line = axes.plot(
-                    x, y, color="#60a5fa", linewidth=1.6,
+                    x, y, color=PREVIEW_SOURCE_LINE_COLOR, linewidth=PREVIEW_SOURCE_LINE_WIDTH,
                     label="Source polylines" if index == 0 else "_nolegend_", zorder=25,
                 )[0]
-                self._style_preview_vector_artist(source_line, 1.6)
+                source_line.set_gid("source-polyline")
+                source_line.set_visible(self.input_polylines_var.get())
+                self._style_preview_vector_artist(source_line, PREVIEW_SOURCE_LINE_WIDTH)
                 if result.metadata.buffer_mode == "per_side":
-                    for fraction in (0.25, 0.75):
-                        start = line.interpolate(max(0, fraction - 0.035), normalized=True)
-                        end = line.interpolate(min(1, fraction + 0.035), normalized=True)
-                        arrow = axes.annotate("", xy=(end.x, end.y), xytext=(start.x, start.y),
-                            arrowprops=dict(arrowstyle="-|>", color="#60a5fa", lw=1.6), zorder=26)
+                    for start, end in self._source_direction_arrows(line):
+                        arrow = axes.annotate("", xy=end, xytext=start,
+                            arrowprops=dict(arrowstyle="-|>", color=PREVIEW_SOURCE_LINE_COLOR,
+                                            lw=PREVIEW_SOURCE_LINE_WIDTH), zorder=26)
+                        self._style_preview_vector_artist(arrow.arrow_patch, PREVIEW_SOURCE_LINE_WIDTH)
                         arrow.set_gid("source-direction-arrow")
-            key_entries.append(("Source polylines", "#60a5fa", "-", 1.6))
+                        arrow.set_visible(self.input_polylines_var.get())
+            key_entries.append(("Source polylines", PREVIEW_SOURCE_LINE_COLOR, "-", PREVIEW_SOURCE_LINE_WIDTH))
         else:
             bx, by = self._preview_polygon_xy(result.base_polygon_projected)
             source_label = (
@@ -3597,7 +3825,9 @@ class BoundaryKmzApp:
             result_generation,
             epsg,
         )
+        surface.key_entries = tuple(key_entries)
         self._update_preview_key(key_content, key_entries)
+        self._refresh_input_polyline_controls()
         if canvas is not None:
             canvas.draw_idle()
         self._schedule_basemap_refresh(surface)
@@ -3618,10 +3848,12 @@ class BoundaryKmzApp:
     def _update_preview_key(
         self,
         key_content: ttk.Frame | None,
-        entries: list[tuple[str, str, str, float]],
+        entries: list[tuple[str, str, str, float]] | tuple[tuple[str, str, str, float], ...],
     ) -> None:
         if key_content is None:
             return
+        if not self.input_polylines_var.get():
+            entries = [entry for entry in entries if entry[0] != "Source polylines"]
         scroll_handler = self._preview_key_scroll_handler(key_content)
         for child in key_content.winfo_children():
             child.destroy()
@@ -3732,6 +3964,32 @@ class BoundaryKmzApp:
         )
 
     @staticmethod
+    def _source_direction_arrows(line):
+        """Keep arrow shafts within a single original segment, including at bends."""
+        coordinates = list(line.coords)
+        segments = [(a, b, math.hypot(b[0] - a[0], b[1] - a[1]))
+                    for a, b in zip(coordinates, coordinates[1:])]
+        total = sum(length for _, _, length in segments)
+        if total <= 0:
+            return []
+        arrows = []
+        for fraction in (0.25, 0.75):
+            remaining = fraction * total
+            for start, end, length in segments:
+                if length <= 0:
+                    continue
+                if remaining > length:
+                    remaining -= length
+                    continue
+                center = min(max(remaining, length * 0.15), length * 0.85)
+                half = min(total * 0.035, center, length - center)
+                def point(distance):
+                    return tuple(start[i] + (end[i] - start[i]) * distance / length for i in (0, 1))
+                arrows.append((point(center - half), point(center + half)))
+                break
+        return arrows
+
+    @staticmethod
     def _preview_polygon_xy(polygon) -> tuple[list[float], list[float]]:
         x_values, y_values = polygon.exterior.xy
         x_list = list(x_values)
@@ -3773,6 +4031,8 @@ class BoundaryKmzApp:
             )
             self._update_preview_key(self._fullscreen_key_content, [])
 
+        self._refresh_input_polyline_controls()
+
     def _draw_empty_preview_on_axes(
         self,
         axes: object,
@@ -3809,7 +4069,10 @@ class BoundaryKmzApp:
         window = tk.Toplevel(self.root)
         window.withdraw()
         window.title("Preview Inspector")
-        window.minsize(640, 420)
+        # Keep the minimum usable area in step with Tk's font/control scale.
+        # A fixed physical-pixel minimum becomes too cramped on HiDPI displays.
+        display_scale = max(1.0, window.winfo_fpixels("1i") / 96.0)
+        window.minsize(math.ceil(640 * display_scale), math.ceil(420 * display_scale))
         window.columnconfigure(0, weight=1)
         window.rowconfigure(1, weight=1)
         style_app_toplevel(window)
@@ -4006,6 +4269,11 @@ class BoundaryKmzApp:
             style="Surface.TCheckbutton",
         )
         self._fullscreen_imagery_checkbutton.grid(row=0, column=0, sticky="e")
+        self._fullscreen_input_polylines_checkbutton = ttk.Checkbutton(
+            fullscreen_view_controls, text="Input polylines",
+            variable=self.input_polylines_var, style="Surface.TCheckbutton", state="disabled",
+        )
+        self._fullscreen_input_polylines_checkbutton.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self._fullscreen_imagery_status_label = ttk.Label(
             fullscreen_view_controls,
             textvariable=self._fullscreen_imagery_status_var,
@@ -4015,7 +4283,7 @@ class BoundaryKmzApp:
         )
         self._fullscreen_imagery_status_label.grid(
             row=0,
-            column=1,
+            column=2,
             sticky="e",
             padx=(8, 0),
         )
@@ -4056,6 +4324,8 @@ class BoundaryKmzApp:
             ):
                 return
             width = int(getattr(event, "width", window.winfo_width()))
+            self._layout_preview_toolbar(self._fullscreen_toolbar, fullscreen_view_controls,
+                                         self._fullscreen_imagery_status_label)
             compact = width < 1200
             key_width = 120 if width <= 900 else PREVIEW_KEY_PANEL_WIDTH
             self._fullscreen_key_frame.configure(width=key_width)
@@ -4501,6 +4771,7 @@ class BoundaryKmzApp:
         self._fullscreen_map_surface = None
         self._fullscreen_toolbar = None
         self._fullscreen_imagery_checkbutton = None
+        self._fullscreen_input_polylines_checkbutton = None
         self._fullscreen_imagery_status_label = None
         self._fullscreen_key_frame = None
         self._fullscreen_key_canvas = None
@@ -4647,6 +4918,7 @@ class BoundaryKmzApp:
         self._refresh_buffer_controls()
         self.status_var.set(status)
         self._refresh_preview_state_badge()
+        self._refresh_input_shell_state()
         self._refresh_action_bar_layout()
 
     def _invalidate_cache(self) -> None:

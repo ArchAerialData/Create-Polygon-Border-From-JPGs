@@ -178,15 +178,20 @@ class GuiPerSideBufferTests(TestCase):
         for width,height,scale in ((720,500,1.333),(960,600,1.333),(1100,760,2.0),(1500,820,1.667)):
             with self.subTest(width=width,scale=scale), _app() as app:
                 app.root.tk.call("tk","scaling",scale)
-                app.root.geometry(f"{width}x{height}")
+                # Native hit-testing needs an on-screen, unobscured window;
+                # Windows' automatic cascade placement can put the footer off-screen.
+                app.root.geometry(f"{width}x{height}+20+20")
+                app.root.attributes("-topmost", True)
                 app.root.deiconify()
                 app.root.update()
                 app.root.lift()
+                app.root.update()
                 app._compatibility=PolylineCompatibility(True,"eligible","ok",1)
                 app._refresh_buffer_controls()
                 for _ in range(4):
                     app.quick_per_side_checkbutton.invoke()
-                    app.root.update_idletasks()
+                    # Process native Configure/Map events as well as idle geometry.
+                    app.root.update()
                     for group in app._active_quick_buffer_groups():
                         self.assertTrue(group.winfo_ismapped())
                         self.assertGreaterEqual(group.winfo_rootx(),app.root.winfo_rootx())

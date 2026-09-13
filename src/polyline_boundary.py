@@ -186,14 +186,20 @@ def build_per_side_polyline_boundary(
                 (coordinates[0], segments[0], -1),
                 (coordinates[-1], segments[-1], 1),
             ):
-                tangent = tangent / np.linalg.norm(tangent)
+                segment_length = np.linalg.norm(tangent)
+                tangent = tangent / segment_length
                 normal = np.array([-tangent[1], tangent[0]])
                 arc = [
                     point + normal * (shift + radius * math.sin(angle))
                     + sign * tangent * radius * max(0, math.cos(angle))
                     for angle in np.linspace(-math.pi / 2, math.pi / 2, 129)
                 ]
-                pieces.append(Polygon(arc))
+                # Overlap the cap seam inward by a bounded numerical tolerance.
+                # At millimetre widths, independently rounded offset/cap endpoints
+                # can otherwise meet at only a point after fixed-grid union.
+                seam = min(segment_length / 4, max(4 * grid, 4 * abs(np.spacing(np.max(np.abs(point))))))
+                inward = -sign * tangent * seam
+                pieces.append(Polygon(arc + [arc[-1] + inward, arc[0] + inward]))
         buffered = union_all(pieces, grid_size=grid)
         polygon = _require_single_polygon(
             fill_polygon_interiors(buffered),
