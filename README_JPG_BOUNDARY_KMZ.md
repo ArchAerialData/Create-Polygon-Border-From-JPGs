@@ -33,6 +33,10 @@ relative to its own location.
 
 In the app:
 
+The input/settings row and map toolbar start collapsed to give the map more room.
+Click the ▾ icon beside `New Input` to expand them, or ▴ to collapse them again.
+Collapsing keeps your settings and closes open settings or View menus.
+
 1. Drop a JPG folder, KML, or KMZ onto the welcome card, or choose it from
    `Input`. The source strip shows the selected folder/file name; hover to see
    the full path. `Input > Edit input path` also accepts a typed path.

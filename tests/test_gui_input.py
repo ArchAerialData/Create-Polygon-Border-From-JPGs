@@ -47,6 +47,55 @@ from jpg_boundary_gui_window import OuterWindowBounds, WorkArea  # noqa: E402
 
 
 class GuiInputTests(TestCase):
+    def test_workspace_controls_start_collapsed_and_give_space_to_map(self) -> None:
+        with _app() as app:
+            app.root.geometry("1440x900+0+0")
+            app.root.update_idletasks()
+            # Startup/resize can lay out the hidden toolbar while its width is 1.
+            app._refresh_workspace_layout()
+            self.assertFalse(app.source_strip.grid_info())
+            self.assertFalse(app.preview_toolbar_frame.grid_info())
+            self.assertTrue(app.workspace_controls_button.grid_info())
+            collapsed_height = app.canvas_widget.winfo_height()
+            app.workspace_controls_button.invoke()
+            app.root.update_idletasks()
+            self.assertTrue(app.source_strip.grid_info())
+            self.assertTrue(app.preview_toolbar_frame.grid_info())
+            self.assertEqual(app.preview_view_controls.grid_info()["row"],
+                             app.preview_toolbar.grid_info()["row"])
+            toolbar_center = app.preview_toolbar.winfo_y() + app.preview_toolbar.winfo_height() / 2
+            controls_center = app.preview_view_controls.winfo_y() + app.preview_view_controls.winfo_height() / 2
+            self.assertLessEqual(abs(toolbar_center - controls_center), 1)
+            self.assertLess(app.canvas_widget.winfo_height(), collapsed_height)
+            app.workspace_controls_button.invoke()
+            app.root.update_idletasks()
+            self.assertEqual(app.canvas_widget.winfo_height(), collapsed_height)
+
+    def test_collapse_closes_settings_and_releases_toolbar_modes(self) -> None:
+        with _app() as app:
+            for mode in ("pan", "zoom"):
+                app.workspace_controls_button.invoke()
+                app._toggle_settings_panel("sections")
+                getattr(app.preview_toolbar, mode)()
+                self.assertTrue(app.preview_toolbar.mode)
+                app.workspace_controls_button.invoke()
+                self.assertFalse(app._settings_drawer_open)
+                self.assertFalse(app.preview_toolbar.mode)
+                self.assertFalse(app.canvas.widgetlock.locked())
+
+    def test_workspace_controls_keep_values_and_collapsed_state_on_resize(self) -> None:
+        with _app() as app:
+            app.buffer_var.set("123")
+            app.workspace_controls_button.invoke()
+            app.workspace_controls_button.invoke()
+            for width in (720, 1440):
+                app._refresh_header_layout(width)
+                self.assertFalse(app.source_strip.grid_info())
+                self.assertFalse(app.preview_toolbar_frame.grid_info())
+                self.assertTrue(app.workspace_controls_button.grid_info())
+            app.workspace_controls_button.invoke()
+            self.assertEqual(app.buffer_var.get(), "123")
+
     def test_source_polylines_are_drawn_separately_in_both_previews(self) -> None:
         with _app() as app:
             result = _sample_boundary_result()
@@ -321,13 +370,15 @@ class GuiInputTests(TestCase):
                 root.geometry(f"{width}x{height}+0+0")
                 try:
                     app = BoundaryKmzApp(root)
+                    app.workspace_controls_button.invoke()
                     root.update_idletasks()
                     app._refresh_workspace_layout()
                     root.update_idletasks()
                     for widget in (app.change_input_button, app.settings_button, app.sections_settings_button,
                                    app.output_settings_button, app.view_button, app.scan_button, app.export_button,
                                    app.quick_buffer_entry, app.quick_section_count_spinbox,
-                                   app.quick_overlap_entry, app.quick_shape_label_entry):
+                                   app.quick_overlap_entry, app.quick_shape_label_entry,
+                                   app.workspace_controls_button):
                         right = widget.winfo_rootx() - root.winfo_rootx() + widget.winfo_width()
                         bottom = widget.winfo_rooty() - root.winfo_rooty() + widget.winfo_height()
                         self.assertLessEqual(right, width)
@@ -636,6 +687,7 @@ class GuiInputTests(TestCase):
         root.geometry("720x500+0+0")
         try:
             app = BoundaryKmzApp(root)
+            app.workspace_controls_button.invoke()
             root.update_idletasks()
 
             self.assertTrue(app._header_compact)
@@ -646,6 +698,7 @@ class GuiInputTests(TestCase):
                 app.settings_button,
                 app.focus_button,
                 app.expand_preview_button,
+                app.workspace_controls_button,
             ):
                 with self.subTest(widget=str(widget)):
                     self.assertTrue(widget.grid_info())

@@ -170,7 +170,7 @@ class BoundaryKmzApp:
     ) -> None:
         self.root = root
         self._last_browse_directory = self._load_browse_directory()
-        self.root.title("JPG Boundary to KMZ")
+        self.root.title("AALLC Polygon Tooling")
         self._theme_style = apply_gui_theme(self.root)
 
         default_output_path = self._default_output_path()
@@ -230,6 +230,7 @@ class BoundaryKmzApp:
         self._busy_message = ""
         self._last_export_path: Path | None = None
         self._focus_mode = False
+        self._workspace_controls_expanded = False
         self._has_selected_input = False
         self._active_settings_group: str | None = "input"
         self._settings_group_frames: dict[str, ttk.Frame] = {}
@@ -344,6 +345,7 @@ class BoundaryKmzApp:
         self._build_top_input_strip(self.root_frame)
         self._build_preview_workspace(self.root_frame)
         self._build_action_bar(self.root_frame)
+        self._refresh_workspace_controls()
         self._refresh_header_layout()
 
     def _build_top_input_strip(self, parent: ttk.Frame) -> None:
@@ -355,11 +357,8 @@ class BoundaryKmzApp:
         self.brand_frame = ttk.Frame(self.header_frame, style="Brand.TFrame", padding=(14, 5))
         self.brand_frame.grid(row=0, column=0, sticky="ew")
         self.brand_frame.columnconfigure(0, weight=1)
-        self.brand_caption = ttk.Label(self.brand_frame, text="ARCH AERIAL  /  MAPPING TOOLS",
-                                       style="Brand.Caption.TLabel")
-        self.brand_caption.grid(row=0, column=0, sticky="w")
         self.app_title_label = ttk.Label(
-            self.brand_frame, text="Boundary workspace", style="Brand.TLabel",
+            self.brand_frame, text="AALLC Boundary Generator", style="Brand.TLabel",
         )
         self.app_title_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
         self.workflow_label = ttk.Label(
@@ -368,10 +367,15 @@ class BoundaryKmzApp:
         )
         self.workflow_label.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
         self.new_input_button = ttk.Button(
-            self.brand_frame, text="New input", style="Secondary.TButton",
+            self.brand_frame, text="New Input", style="Success.TButton",
             command=self._return_to_import,
         )
         self.new_input_button.grid(row=0, column=3, padx=(14, 0), sticky="e")
+        self.workspace_controls_button = ttk.Button(
+            self.brand_frame, text="▾", width=3, style="Secondary.TButton",
+            command=self._toggle_workspace_controls,
+        )
+        self.workspace_controls_button.grid(row=0, column=4, padx=(8, 0), sticky="e")
         self.source_strip = ttk.Frame(self.header_frame, style="Card.TFrame", padding=(12, 5))
         self.source_strip.grid(row=1, column=0, sticky="ew")
         self.source_strip.columnconfigure(0, weight=1)
@@ -425,6 +429,36 @@ class BoundaryKmzApp:
         self._register_drop_target(
             self.compact_input_target,
             feedback_surface=self.compact_input_target,
+        )
+
+    def _toggle_workspace_controls(self) -> None:
+        self._workspace_controls_expanded = not self._workspace_controls_expanded
+        if not self._workspace_controls_expanded:
+            self._close_settings_drawer()
+            self._close_view_menu()
+            # Release toolbar mouse modes before hiding their active buttons.
+            if self.preview_toolbar.mode == "pan/zoom":
+                self.preview_toolbar.pan()
+            elif self.preview_toolbar.mode == "zoom rect":
+                self.preview_toolbar.zoom()
+            self._preview_pan_start = None
+            for tooltip in self._tooltips:
+                tooltip.hide()
+        self._refresh_workspace_controls()
+
+        # A hidden toolbar can retain the wrapped layout calculated at width 1.
+        # Reflow after Tk has restored the expanded container's actual width.
+        if self._workspace_controls_expanded and self._layout_after_id is None:
+            self._layout_after_id = self.root.after_idle(self._refresh_workspace_layout)
+
+    def _refresh_workspace_controls(self) -> None:
+        for frame in (self.source_strip, self.preview_toolbar_frame):
+            if self._workspace_controls_expanded:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        self.workspace_controls_button.configure(
+            text="▴" if self._workspace_controls_expanded else "▾",
         )
 
     def _build_preview_workspace(self, parent: ttk.Frame) -> None:
@@ -1403,6 +1437,9 @@ class BoundaryKmzApp:
 
     def _install_control_help(self) -> None:
         self._tooltips = [
+            ToolTip(self.workspace_controls_button, lambda:
+                    "Collapse input/settings and map toolbar" if self._workspace_controls_expanded
+                    else "Expand input/settings and map toolbar"),
             ToolTip(self.compact_input_target, lambda: self.parent_var.get() or "Choose a folder or vector file from Input."),
             ToolTip(self.settings_button, "Buffer distance and JPG outline strategy."),
             ToolTip(self.sections_settings_button, "Shape count, overlap, labels, and split direction."),
@@ -2094,10 +2131,6 @@ class BoundaryKmzApp:
             return
         current_width = width or self.root.winfo_width()
         self.brand_frame.configure(padding=(14, 5))
-        if current_width < 1200 or self._focus_mode:
-            self.brand_caption.grid_remove()
-        else:
-            self.brand_caption.grid(row=0, column=1, padx=(16, 0), sticky="e")
         buttons = (self.change_input_button, self.settings_button,
                    self.sections_settings_button, self.output_settings_button, self.view_button)
         action_width = sum(button.winfo_reqwidth() + 6 for button in buttons)
@@ -2121,7 +2154,8 @@ class BoundaryKmzApp:
             used += requested
             column += 1
         brand_width = sum(widget.winfo_reqwidth() for widget in (
-            self.app_title_label, self.brand_caption, self.workflow_label, self.new_input_button,
+            self.app_title_label, self.workflow_label, self.new_input_button,
+            self.workspace_controls_button,
         )) + 120
         if current_width < max(1600, brand_width) or self._focus_mode:
             self.workflow_label.grid_remove()
