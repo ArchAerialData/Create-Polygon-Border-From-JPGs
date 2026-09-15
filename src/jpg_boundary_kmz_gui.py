@@ -5,6 +5,7 @@ import queue
 import subprocess
 import sys
 import threading
+import tempfile
 import tkinter as tk
 import math
 import time
@@ -168,6 +169,7 @@ class BoundaryKmzApp:
         basemap_client: ArcGisBasemapClient | None = None,
     ) -> None:
         self.root = root
+        self._last_browse_directory = self._load_browse_directory()
         self.root.title("JPG Boundary to KMZ")
         self._theme_style = apply_gui_theme(self.root)
 
@@ -2828,7 +2830,47 @@ class BoundaryKmzApp:
             self.status_var.set(f"Building preview for first dropped input: {input_path}")
 
     @staticmethod
-    def _browse_initial_directory() -> str:
+    def _browse_directory_file() -> Path:
+        if sys.platform == "win32":
+            base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        return base / "JpgBoundaryToKmz" / "last-browse-directory.txt"
+
+    def _load_browse_directory(self) -> str:
+        try:
+            return self._browse_directory_file().read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return ""
+
+    def _remember_browse_directory(self, directory: Path) -> None:
+        self._last_browse_directory = str(directory.resolve())
+        temporary_path = None
+        try:
+            destination = self._browse_directory_file()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=destination.parent, delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(self._last_browse_directory)
+            temporary_path.replace(destination)
+        except OSError:
+            # Preferences must never prevent opening or saving the user's files.
+            pass
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _browse_initial_directory(self) -> str:
+        try:
+            if self._last_browse_directory and Path(self._last_browse_directory).is_dir():
+                return self._last_browse_directory
+        except (OSError, ValueError):
+            pass
         if sys.platform == "win32":
             # Tk 8.6 normalizes a bare ::{CLSID} into an invalid shell address.
             # A Windows shell namespace folder survives normalization and opens
@@ -2853,6 +2895,7 @@ class BoundaryKmzApp:
         )
         if not folder:
             return
+        self._remember_browse_directory(Path(folder))
         self._set_input_path(Path(folder))
 
     def _browse_kmz(self) -> None:
@@ -2871,6 +2914,7 @@ class BoundaryKmzApp:
         )
         if not kmz_path:
             return
+        self._remember_browse_directory(Path(kmz_path).parent)
         self._set_input_path(Path(kmz_path))
 
     def _browse_output(self) -> None:
@@ -2887,6 +2931,7 @@ class BoundaryKmzApp:
             parent=self.root,
         )
         if output:
+            self._remember_browse_directory(Path(output).parent)
             self._set_output_path(Path(output))
 
     def _view_output_folder(self) -> None:

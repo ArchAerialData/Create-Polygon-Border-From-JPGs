@@ -50,6 +50,11 @@ In the app:
 5. Use `View` for the map legend, Focus Preview, the separate Inspector, and
    World Imagery. `Details` retains the full processing/export summary.
 
+The folder, KML/KMZ, and save dialogs reopen in the last folder selected, including
+after restarting the app. Canceling a dialog preserves that location. If the
+folder is no longer available, the dialog uses the default location. On Windows,
+this preference is stored in `%LOCALAPPDATA%\JpgBoundaryToKmz\last-browse-directory.txt`.
+
 ## Buffer and section behavior
 
 - A valid positive polyline buffer stays at the requested distance, including
