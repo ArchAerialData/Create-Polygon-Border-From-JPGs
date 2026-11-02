@@ -65,6 +65,9 @@ except ImportError:
 from jpg_boundary_kmz_core import (
     BoundaryError,
     BoundaryResult,
+    BoundaryOutput,
+    BoundaryCollectionResult,
+    BOUNDARY_COLORS,
     GENERATION_PROFILE_EXPORT,
     GENERATION_PROFILE_PREVIEW,
     MAX_SECTION_COUNT,
@@ -211,9 +214,10 @@ class BoundaryKmzApp:
         self._details_text = ""
 
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
-        self._cached_result: BoundaryResult | None = None
+        self._source_polygon_count = 0
+        self._cached_result: BoundaryOutput | None = None
         self._cached_settings: _SettingsKey | None = None
-        self._last_displayed_result: BoundaryResult | None = None
+        self._last_displayed_result: BoundaryOutput | None = None
         self._last_displayed_signature: tuple[str, ...] | None = None
         self._preview_stale = False
         self._stale_reason = ""
@@ -273,7 +277,7 @@ class BoundaryKmzApp:
         self._closing = False
         self._accepted_result_generation = 0
         self._active_result_generation: int | None = None
-        self._map_result_reference: BoundaryResult | None = None
+        self._map_result_reference: BoundaryOutput | None = None
         self._fullscreen_surface_serial = 0
         self._surface_draw_guards: set[str] = set()
         self._surface_copyright_text: dict[str, str] = {}
@@ -1623,7 +1627,7 @@ class BoundaryKmzApp:
         self.section_count_spinbox = ttk.Spinbox(
             parent, from_=1, to=MAX_SECTION_COUNT, textvariable=self.section_count_var,
             width=8, style="App.TSpinbox")
-        self._settings_field(parent, 0, "Number of shapes", self.section_count_spinbox)
+        self.section_count_label = self._settings_field(parent, 0, "Number of shapes", self.section_count_spinbox)
         self.sections_hint = ttk.Label(parent, text="Use 2 or more shapes to enable splitting.",
                                        style="Muted.TLabel", wraplength=320)
         self.sections_hint.grid(row=2, column=0, sticky="w", pady=(0, 10))
@@ -1748,7 +1752,7 @@ class BoundaryKmzApp:
             self._quick_side_groups.append((group, entry))
         self.quick_left_buffer_entry = self._quick_side_groups[0][1]
         self.quick_right_buffer_entry = self._quick_side_groups[1][1]
-        group, _ = quick_field("Shapes")
+        group, self.quick_section_count_label = quick_field("Shapes")
         self.quick_section_count_spinbox = ttk.Spinbox(
             group, from_=1, to=MAX_SECTION_COUNT, textvariable=self.section_count_var,
             width=4, style="Compact.App.TSpinbox")
@@ -2054,6 +2058,9 @@ class BoundaryKmzApp:
             ),
             "output": self.output_name_var.get().strip() or "Unnamed",
         }
+        if self._source_polygon_count > 1:
+            count = self._current_section_count_for_state()
+            summaries["sections"] = f"{self._source_polygon_count} polygons · {self._source_polygon_count * count} outputs"
         for key, text in summaries.items():
             label = getattr(self, f"_{key}_settings_summary", None)
             if label is not None:
@@ -3070,6 +3077,8 @@ class BoundaryKmzApp:
             self._last_input_text = current_text
             self._reset_per_side_input()
             self._clear_preview_for_input_change()
+            self._update_section_control_state()
+            self._update_fullscreen_control_state()
         self._refresh_input_shell_state()
         self._refresh_drawer_summaries()
 
@@ -3090,6 +3099,7 @@ class BoundaryKmzApp:
 
     def _reset_per_side_input(self) -> None:
         self._input_generation += 1
+        self._source_polygon_count = 0
         self._compatibility = None
         self._compatibility_identity = None
         self._updating_buffer_mode = True
@@ -3230,6 +3240,13 @@ class BoundaryKmzApp:
                 widget.configure(state="readonly" if enabled else "disabled")
             else:
                 widget.configure(state=state)
+        multi_polygon = self._source_polygon_count > 1
+        self.section_count_label.configure(text="Sections per polygon" if multi_polygon else "Number of shapes")
+        self.quick_section_count_label.configure(text="Sections per polygon" if multi_polygon else "Shapes")
+        if multi_polygon:
+            for widget in (self.shape_label_label, self.shape_label_entry,
+                           self.quick_shape_label_label, self.quick_shape_label_entry):
+                widget.configure(state="disabled")
         custom_enabled = enabled and self.split_direction_var.get() == "Custom"
         custom_state = "normal" if custom_enabled else "disabled"
         custom_widgets = self._custom_direction_widgets or [
@@ -3246,6 +3263,8 @@ class BoundaryKmzApp:
             else:
                 widget.grid_remove()
         self.sections_hint.configure(text=(
+            f"{self._source_polygon_count} source polygons; settings apply to each. Facility names supply labels."
+            if multi_polygon else
             "Overlap is shared between neighboring shapes." if multiple_sections
             else "Use 2 or more shapes to enable splitting."
         ))
@@ -3434,7 +3453,7 @@ class BoundaryKmzApp:
         self._active_request = request
         return request
 
-    def _generate_for_request(self, request: _GeometryRequest, **options) -> BoundaryResult:
+    def _generate_for_request(self, request: _GeometryRequest, **options) -> BoundaryOutput:
         # Worker-only path: no Tk variables, UI APIs, or extra parser process.
         path = request.input_path
         scalar = request.buffer.unified_ft if request.buffer.mode == "unified" else 0.0
@@ -3479,7 +3498,7 @@ class BoundaryKmzApp:
         self, input_path: Path, buffer_ft: _BufferValue, section_count: int, overlap_ft: float,
         shape_label: str, outline_mode: str, split_direction_deg: float | None,
         simplify_vector_output: bool, output_path: Path,
-        cached_result: BoundaryResult | None, request: _GeometryRequest,
+        cached_result: BoundaryOutput | None, request: _GeometryRequest,
     ) -> None:
         try:
             if source_identity(input_path) != request.identity:
@@ -3541,7 +3560,7 @@ class BoundaryKmzApp:
                 continue
             if kind == "scan_done":
                 result = payload
-                assert isinstance(result, BoundaryResult)
+                assert isinstance(result, (BoundaryResult, BoundaryCollectionResult))
                 settings_match = request is None or request.control_signature == self._preview_control_signature()
                 if settings_match:
                     self._sync_effective_buffer(result)
@@ -3568,7 +3587,7 @@ class BoundaryKmzApp:
                 )
             elif kind == "export_done":
                 result, saved_path = payload
-                assert isinstance(result, BoundaryResult)
+                assert isinstance(result, (BoundaryResult, BoundaryCollectionResult))
                 saved_path = Path(saved_path)
                 settings_match = request is None or request.control_signature == self._preview_control_signature()
                 if settings_match:
@@ -3746,7 +3765,13 @@ class BoundaryKmzApp:
             output_path,
         )
 
-    def _draw_preview(self, result: BoundaryResult) -> None:
+    def _draw_preview(self, result: BoundaryOutput) -> None:
+        self._source_polygon_count = (
+            result.metadata.source_polygon_count if isinstance(result, BoundaryCollectionResult) else 0
+        )
+        self._update_section_control_state()
+        self._update_fullscreen_control_state()
+        self._refresh_drawer_summaries()
         if result is not self._map_result_reference:
             self._accepted_result_generation += 1
             self._active_result_generation = self._accepted_result_generation
@@ -3765,7 +3790,7 @@ class BoundaryKmzApp:
 
     def _draw_preview_on_axes(
         self,
-        result: BoundaryResult,
+        result: BoundaryOutput,
         axes: object,
         figure: Figure,
         canvas: FigureCanvasTkAgg | None,
@@ -3776,117 +3801,108 @@ class BoundaryKmzApp:
         axes.clear()
         style_matplotlib_axes(figure, axes)
         key_entries: list[tuple[str, str, str, float]] = []
-        if result.metadata.input_type == "JPG folder":
-            point_artist = axes.scatter(
-                result.projected_points[:, 0],
-                result.projected_points[:, 1],
-                s=4,
-                color="#1f77b4",
-                linewidths=0,
-                label="JPG GPS points",
-                zorder=25,
-            )
-            point_artist.set_path_effects(
-                [
-                    patheffects.Stroke(
-                        linewidth=2.0,
-                        foreground=PALETTE.BACKGROUND_DEEP,
-                    ),
-                    patheffects.Normal(),
-                ]
-            )
-            key_entries.append(("JPG GPS points", "#1f77b4", "point", 1.0))
-        elif result.source_lines_projected:
-            for index, line in enumerate(result.source_lines_projected):
-                # Keep separate features separate; never join their endpoints.
-                x, y = line.xy
-                source_line = axes.plot(
-                    x, y, color=PREVIEW_SOURCE_LINE_COLOR, linewidth=PREVIEW_SOURCE_LINE_WIDTH,
-                    label="Source polylines" if index == 0 else "_nolegend_", zorder=25,
-                )[0]
-                source_line.set_gid("source-polyline")
-                source_line.set_visible(self.input_polylines_var.get())
-                self._style_preview_vector_artist(source_line, PREVIEW_SOURCE_LINE_WIDTH)
-                if result.metadata.buffer_mode == "per_side":
-                    for start, end in self._source_direction_arrows(line):
-                        arrow = axes.annotate("", xy=end, xytext=start,
-                            arrowprops=dict(arrowstyle="-|>", color=PREVIEW_SOURCE_LINE_COLOR,
-                                            lw=PREVIEW_SOURCE_LINE_WIDTH), zorder=26)
-                        self._style_preview_vector_artist(arrow.arrow_patch, PREVIEW_SOURCE_LINE_WIDTH)
-                        arrow.set_gid("source-direction-arrow")
-                        arrow.set_visible(self.input_polylines_var.get())
-            key_entries.append(("Source polylines", PREVIEW_SOURCE_LINE_COLOR, "-", PREVIEW_SOURCE_LINE_WIDTH))
+        if isinstance(result, BoundaryCollectionResult):
+            key_entries.extend(self._draw_collection_polygons(result, axes))
         else:
-            bx, by = self._preview_polygon_xy(result.base_polygon_projected)
-            source_label = (
-                "Buffered source LineStrings"
-                if "polyline" in result.metadata.input_type.lower()
-                else "Source polygon"
-            )
-            source_line = axes.plot(
-                bx,
-                by,
-                color="#1f77b4",
-                linewidth=1.4,
-                linestyle=":",
-                label=source_label,
-                zorder=20,
-            )[0]
-            self._style_preview_vector_artist(source_line, 1.4)
-            key_entries.append((source_label, "#1f77b4", ":", 1.4))
+            if result.metadata.input_type == "JPG folder":
+                point_artist = axes.scatter(
+                    result.projected_points[:, 0],
+                    result.projected_points[:, 1],
+                    s=4,
+                    color="#1f77b4",
+                    linewidths=0,
+                    label="JPG GPS points",
+                    zorder=25,
+                )
+                point_artist.set_path_effects(
+                    [
+                        patheffects.Stroke(
+                            linewidth=2.0,
+                            foreground=PALETTE.BACKGROUND_DEEP,
+                        ),
+                        patheffects.Normal(),
+                    ]
+                )
+                key_entries.append(("JPG GPS points", "#1f77b4", "point", 1.0))
+            elif result.source_lines_projected:
+                for index, line in enumerate(result.source_lines_projected):
+                    # Keep separate features separate; never join their endpoints.
+                    x, y = line.xy
+                    source_line = axes.plot(
+                        x, y, color=PREVIEW_SOURCE_LINE_COLOR, linewidth=PREVIEW_SOURCE_LINE_WIDTH,
+                        label="Source polylines" if index == 0 else "_nolegend_", zorder=25,
+                    )[0]
+                    source_line.set_gid("source-polyline")
+                    source_line.set_visible(self.input_polylines_var.get())
+                    self._style_preview_vector_artist(source_line, PREVIEW_SOURCE_LINE_WIDTH)
+                    if result.metadata.buffer_mode == "per_side":
+                        for start, end in self._source_direction_arrows(line):
+                            arrow = axes.annotate("", xy=end, xytext=start,
+                                arrowprops=dict(arrowstyle="-|>", color=PREVIEW_SOURCE_LINE_COLOR,
+                                                lw=PREVIEW_SOURCE_LINE_WIDTH), zorder=26)
+                            self._style_preview_vector_artist(arrow.arrow_patch, PREVIEW_SOURCE_LINE_WIDTH)
+                            arrow.set_gid("source-direction-arrow")
+                            arrow.set_visible(self.input_polylines_var.get())
+                key_entries.append(("Source polylines", PREVIEW_SOURCE_LINE_COLOR, "-", PREVIEW_SOURCE_LINE_WIDTH))
+            else:
+                bx, by = self._preview_polygon_xy(result.base_polygon_projected)
+                source_label = (
+                    "Buffered source LineStrings"
+                    if "polyline" in result.metadata.input_type.lower()
+                    else "Source polygon"
+                )
+                source_line = axes.plot(
+                    bx,
+                    by,
+                    color="#1f77b4",
+                    linewidth=1.4,
+                    linestyle=":",
+                    label=source_label,
+                    zorder=20,
+                )[0]
+                self._style_preview_vector_artist(source_line, 1.4)
+                key_entries.append((source_label, "#1f77b4", ":", 1.4))
 
-        if result.sections:
-            x, y = self._preview_polygon_xy(result.final_polygon_projected)
-            parent_line = axes.plot(
-                x,
-                y,
-                color="#9ca3af",
-                linewidth=1.4,
-                linestyle="--",
-                label="Parent outline",
-                zorder=20,
-            )[0]
-            self._style_preview_vector_artist(parent_line, 1.4)
-            key_entries.append(("Parent outline", "#9ca3af", "--", 1.4))
-            section_colors = [
-                "#d62728",
-                "#2ca02c",
-                "#1f77b4",
-                "#9467bd",
-                "#ff7f0e",
-                "#17becf",
-                "#8c564b",
-                "#e377c2",
-                "#7f7f7f",
-                "#bcbd22",
-            ]
-            for section in result.sections:
-                color = section_colors[(section.index - 1) % len(section_colors)]
-                sx, sy = self._preview_polygon_xy(section.polygon_projected)
-                section_line = axes.plot(
-                    sx,
-                    sy,
-                    color=color,
-                    linewidth=1.8,
-                    label=section.display_name,
+            if result.sections:
+                x, y = self._preview_polygon_xy(result.final_polygon_projected)
+                parent_line = axes.plot(
+                    x,
+                    y,
+                    color="#9ca3af",
+                    linewidth=1.4,
+                    linestyle="--",
+                    label="Parent outline",
+                    zorder=20,
+                )[0]
+                self._style_preview_vector_artist(parent_line, 1.4)
+                key_entries.append(("Parent outline", "#9ca3af", "--", 1.4))
+                for section in result.sections:
+                    color = BOUNDARY_COLORS[(section.index - 1) % len(BOUNDARY_COLORS)]
+                    sx, sy = self._preview_polygon_xy(section.polygon_projected)
+                    section_line = axes.plot(
+                        sx,
+                        sy,
+                        color=color,
+                        linewidth=1.8,
+                        label=section.display_name,
+                        zorder=22,
+                    )[0]
+                    self._style_preview_vector_artist(section_line, 1.8)
+                    axes.fill(sx, sy, color=color, alpha=0.08, zorder=10)
+                    key_entries.append((section.display_name, color, "-", 1.8))
+            else:
+                x, y = self._preview_polygon_xy(result.final_polygon_projected)
+                boundary_line = axes.plot(
+                    x,
+                    y,
+                    color="#d62728",
+                    linewidth=2.0,
+                    label="KMZ boundary",
                     zorder=22,
                 )[0]
-                self._style_preview_vector_artist(section_line, 1.8)
-                axes.fill(sx, sy, color=color, alpha=0.08, zorder=10)
-                key_entries.append((section.display_name, color, "-", 1.8))
-        else:
-            x, y = self._preview_polygon_xy(result.final_polygon_projected)
-            boundary_line = axes.plot(
-                x,
-                y,
-                color="#d62728",
-                linewidth=2.0,
-                label="KMZ boundary",
-                zorder=22,
-            )[0]
-            self._style_preview_vector_artist(boundary_line, 2.0)
-            axes.fill(x, y, color="#d62728", alpha=0.08, zorder=10)
-            key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
+                self._style_preview_vector_artist(boundary_line, 2.0)
+                axes.fill(x, y, color="#d62728", alpha=0.08, zorder=10)
+                key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
 
         self._fit_preview_axes_to_result(result, axes)
         axes.set_aspect("equal", adjustable="datalim")
@@ -3910,6 +3926,36 @@ class BoundaryKmzApp:
         if canvas is not None:
             canvas.draw_idle()
         self._schedule_basemap_refresh(surface)
+
+    def _draw_collection_polygons(
+        self, result: BoundaryCollectionResult, axes: object,
+    ) -> list[tuple[str, str, str, float]]:
+        entries = [("Source polygons", "#1f77b4", ":", 1.4)]
+        color_index = 0
+        for child, display in zip(result.children, result.display_results):
+            bx, by = self._preview_polygon_xy(display.base_polygon_projected)
+            source_line = axes.plot(bx, by, color="#1f77b4", linewidth=1.4,
+                                    linestyle=":", zorder=20)[0]
+            source_line.set_gid(f"source-{child.source_id}")
+            self._style_preview_vector_artist(source_line, 1.4)
+            if display.sections:
+                x, y = self._preview_polygon_xy(display.final_polygon_projected)
+                parent = axes.plot(x, y, color="#9ca3af", linewidth=1.4, linestyle="--", zorder=20)[0]
+                self._style_preview_vector_artist(parent, 1.4)
+            outputs = (
+                [(s.display_name, s.polygon_projected) for s in display.sections]
+                or [(child.source_name, display.final_polygon_projected)]
+            )
+            for name, polygon in outputs:
+                color = BOUNDARY_COLORS[color_index % len(BOUNDARY_COLORS)]
+                x, y = self._preview_polygon_xy(polygon)
+                line = axes.plot(x, y, color=color, linewidth=1.8, label=name, zorder=22)[0]
+                line.set_gid(f"boundary-{child.source_id}-{color_index}")
+                self._style_preview_vector_artist(line, 1.8)
+                axes.fill(x, y, color=color, alpha=0.08, zorder=10)
+                entries.append((name, color, "-", 1.8))
+                color_index += 1
+        return entries
 
     @staticmethod
     def _style_preview_vector_artist(artist: object, linewidth: float) -> None:
@@ -3994,7 +4040,7 @@ class BoundaryKmzApp:
             return (7, 4)
         return None
 
-    def _fit_preview_axes_to_result(self, result: BoundaryResult, axes: object) -> None:
+    def _fit_preview_axes_to_result(self, result: BoundaryOutput, axes: object) -> None:
         bounds = self._preview_result_bounds(result)
         if bounds is None:
             axes.relim()
@@ -4011,9 +4057,16 @@ class BoundaryKmzApp:
 
     @staticmethod
     def _preview_result_bounds(
-        result: BoundaryResult,
+        result: BoundaryOutput,
     ) -> tuple[float, float, float, float] | None:
         bounds: list[tuple[float, float, float, float]] = []
+        if isinstance(result, BoundaryCollectionResult):
+            bounds = [BoundaryKmzApp._preview_result_bounds(child) for child in result.display_results]
+            bounds = [bound for bound in bounds if bound is not None]
+            if not bounds:
+                return None
+            return (min(b[0] for b in bounds), min(b[1] for b in bounds),
+                    max(b[2] for b in bounds), max(b[3] for b in bounds))
         for polygon in (result.base_polygon_projected, result.final_polygon_projected):
             if polygon is not None and not polygon.is_empty:
                 bounds.append(tuple(float(value) for value in polygon.bounds))
@@ -4185,6 +4238,7 @@ class BoundaryKmzApp:
         self._fullscreen_imagery_status_var = tk.StringVar(master=window, value="")
 
         section_count_label = ttk.Label(controls, text="# Shapes", style="Field.TLabel")
+        self._fullscreen_section_count_label = section_count_label
         section_count_label.grid(row=0, column=0, sticky="w")
         section_spinbox = ttk.Spinbox(
             controls,
@@ -4212,6 +4266,7 @@ class BoundaryKmzApp:
             width=26,
         )
         shape_entry.grid(row=0, column=5, sticky="ew", padx=(4, 12))
+        self._fullscreen_shape_label_widgets = (shape_label, shape_entry)
 
         split_label = ttk.Label(controls, text="Direction", style="Field.TLabel")
         split_label.grid(row=0, column=6, sticky="w")
@@ -4706,6 +4761,10 @@ class BoundaryKmzApp:
         if not self._fullscreen_window_exists():
             return
 
+        multi_polygon = self._source_polygon_count > 1
+        self._fullscreen_section_count_label.configure(
+            text="Sections per polygon" if multi_polygon else "# Shapes")
+
         if self._busy:
             for widget in (
                 self._fullscreen_mutation_widgets
@@ -4739,6 +4798,9 @@ class BoundaryKmzApp:
                 widget.configure(state="readonly" if enabled else "disabled")
             else:
                 widget.configure(state=section_state)
+        if multi_polygon:
+            for widget in self._fullscreen_shape_label_widgets:
+                widget.configure(state="disabled")
 
         custom_enabled = (
             enabled
@@ -4751,7 +4813,7 @@ class BoundaryKmzApp:
         if self._fullscreen_split_direction_custom_entry is not None:
             self._fullscreen_split_direction_custom_entry.configure(state=custom_state)
 
-    def _draw_fullscreen_preview(self, result: BoundaryResult | None = None) -> None:
+    def _draw_fullscreen_preview(self, result: BoundaryOutput | None = None) -> None:
         if not self._fullscreen_window_exists():
             return
         if (
@@ -5080,14 +5142,17 @@ class BoundaryKmzApp:
         return value % 180.0
 
     @staticmethod
-    def _ready_status(result: BoundaryResult, base_status: str) -> str:
+    def _ready_status(result: BoundaryOutput, base_status: str) -> str:
+        if isinstance(result, BoundaryCollectionResult):
+            return (f"{base_status} {result.metadata.source_polygon_count} source polygons; "
+                    f"{result.metadata.output_polygon_count} outputs.")
         if result.metadata.polyline_buffer_adjustment_reason:
             return f"{base_status} Auto buffer set."
         if result.metadata.fallback_reason:
             return f"{base_status} Auto fallback used."
         return base_status
 
-    def _sync_effective_buffer(self, result: BoundaryResult) -> None:
+    def _sync_effective_buffer(self, result: BoundaryOutput) -> None:
         if result.metadata.buffer_mode == "per_side" or not result.metadata.polyline_buffer_adjustment_reason:
             return
         selected_buffer = result.metadata.polyline_selected_buffer_ft or result.metadata.buffer_ft

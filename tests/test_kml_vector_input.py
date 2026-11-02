@@ -74,14 +74,15 @@ class KmlVectorInputTests(TestCase):
             self.assertEqual(len(result.polygons_wgs84), 1)
             self.assertEqual(result.ignored_interior_ring_count, 1)
 
-    def test_multiple_polygons_without_lines_are_rejected(self) -> None:
+    def test_multiple_polygons_without_lines_are_preserved(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "polygons.kml"
             polygon = _polygon("-80,35,0 -79.9,35,0 -79.9,35.1,0 -80,35,0")
             path.write_text(_kml(polygon + polygon), encoding="utf-8")
 
-            with self.assertRaisesRegex(VectorInputError, "exactly one polygon"):
-                load_vector_input(path)
+            result = load_vector_input(path)
+            self.assertEqual(len(result.polygons_wgs84), 2)
+            self.assertEqual([source.name for source in result.polygon_sources], ["Polygon 1", "Polygon 2"])
 
     def test_malformed_coordinate_is_rejected(self) -> None:
         with TemporaryDirectory() as tmp:

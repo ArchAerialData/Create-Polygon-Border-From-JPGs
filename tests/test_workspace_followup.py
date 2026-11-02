@@ -12,7 +12,8 @@ class WorkspaceFollowupTests(TestCase):
     def test_failed_import_restores_browse_controls_and_new_input_clears_error(self):
         polygon = '<Polygon><outerBoundaryIs><LinearRing><coordinates>-80,35 -79.99,35 -79.99,35.01 -80,35</coordinates></LinearRing></outerBoundaryIs></Polygon>'
         with TemporaryDirectory() as tmp, _app() as app:
-            path = write_kmz(tmp, f'<MultiGeometry>{polygon}{polygon}</MultiGeometry>')
+            malformed = polygon.replace('-79.99,35.01', 'bad')
+            path = write_kmz(tmp, f'<MultiGeometry>{polygon}{malformed}</MultiGeometry>')
             with patch.object(gui.threading, "Thread") as thread:
                 app._set_input_path(path)
                 call = thread.call_args.kwargs
@@ -24,7 +25,7 @@ class WorkspaceFollowupTests(TestCase):
             self.assertTrue(app.empty_input_overlay.place_info())
             self.assertIsNone(app._last_displayed_result)
             self.assertNotIn('disabled', app.browse_vector_button.state())
-            self.assertIn('found 2', app.status_var.get())
+            self.assertIn('malformed', app.status_var.get())
             app.new_input_button.invoke()
             self.assertEqual(app.parent_var.get(), '')
             self.assertEqual(app._preview_error, '')

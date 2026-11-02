@@ -13,6 +13,14 @@ class VectorInputError(ValueError):
 
 
 @dataclass(frozen=True)
+class PolygonSource:
+    source_id: str
+    name: str
+    placemark_name: str
+    ignored_interior_ring_count: int = 0
+
+
+@dataclass(frozen=True)
 class VectorInputGeometry:
     source_path: Path
     input_kind: str
@@ -22,6 +30,7 @@ class VectorInputGeometry:
     ignored_polygon_count: int = 0
     ignored_interior_ring_count: int = 0
     geometry_inventory: tuple[str, ...] | None = None
+    polygon_sources: tuple[PolygonSource, ...] = ()
 
 
 def load_vector_input(path: Path) -> VectorInputGeometry:
@@ -61,21 +70,40 @@ def load_vector_input(path: Path) -> VectorInputGeometry:
 
     if not polygon_elements:
         raise VectorInputError("The KML/KMZ file does not contain LineString or Polygon geometry.")
-    if len(polygon_elements) > 1:
-        raise VectorInputError(
-            "KML/KMZ polygon input must contain exactly one polygon when no LineStrings are present; "
-            f"found {len(polygon_elements)}."
-        )
-
-    polygon, ignored_interiors = _parse_polygon(polygon_elements[0])
+    parents = {child: parent for parent in root.iter() for child in parent}
+    polygons: list[Polygon] = []
+    sources: list[PolygonSource] = []
+    used_names: set[str] = set()
+    for index, element in enumerate(polygon_elements, 1):
+        parent = parents.get(element)
+        while parent is not None and _local_name(parent.tag) != "Placemark":
+            parent = parents.get(parent)
+        placemark_name = ""
+        if parent is not None:
+            placemark_name = next(
+                ((child.text or "").strip() for child in parent if _local_name(child.tag) == "name"), ""
+            )
+        base_name = placemark_name or f"Polygon {index}"
+        name, suffix = base_name, 2
+        while name in used_names:
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+        used_names.add(name)
+        try:
+            polygon, ignored_interiors = _parse_polygon(element)
+        except VectorInputError as exc:
+            raise VectorInputError(f"Polygon {name!r}: {exc}") from exc
+        polygons.append(polygon)
+        sources.append(PolygonSource(f"polygon-{index}", name, placemark_name, ignored_interiors))
     return VectorInputGeometry(
         source_path=source_path.resolve(),
         input_kind=f"polygon_{kind_suffix}",
         lines_wgs84=(),
-        polygons_wgs84=(polygon,),
+        polygons_wgs84=tuple(polygons),
         source_name=source_path.stem,
-        ignored_interior_ring_count=ignored_interiors,
+        ignored_interior_ring_count=sum(source.ignored_interior_ring_count for source in sources),
         geometry_inventory=inventory,
+        polygon_sources=tuple(sources),
     )
 
 

@@ -1,9 +1,9 @@
 # JPG Boundary to KMZ GUI
 
 This local Python app accepts a parent folder of geotagged JPG/JPEG photos,
-a KML/KMZ file containing source LineStrings, or a single-polygon KML/KMZ.
-It builds or reads one generalized exterior-only outline, applies a buffer in
-feet, optionally splits the result into connected overlapping sections,
+a KML/KMZ file containing source LineStrings, or a KML/KMZ containing one or more polygons.
+It builds or reads exterior-only outlines, applies a buffer in
+feet, optionally splits each outline into connected overlapping sections,
 previews the result, and exports a KMZ polygon set.
 
 ## Run
@@ -243,13 +243,30 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
 - If a KML/KMZ contains both `LineString` and `Polygon` geometry, the
   LineStrings are used and polygons are ignored with a details note.
 - LineString KML/KMZ inputs require a buffer greater than `0 ft`.
-- Single-polygon KML and KMZ inputs are accepted.
+- Single- and multi-polygon KML/KMZ inputs are accepted, including nested
+  `MultiGeometry`. Multiple polygons remain separate even when they overlap.
+- Multi-polygon inputs apply the same additional buffer, sections per polygon,
+  overlap, split direction, and simplification setting independently to each
+  source polygon. A setting of 1 retains one output per source polygon; 2
+  produces two sections per source polygon. Filenames do not set buffer values.
+- Source Placemark names label facilities. Missing names become `Polygon N`;
+  duplicate names and additional polygons in a Placemark receive numbered
+  suffixes. Source order is preserved. Shared shape-label editing is disabled
+  for multi-polygon inputs because each facility supplies its own name.
+- Each facility is processed in its own detected UTM CRS. Main and Inspector
+  previews transform all facilities into one shared display CRS and show counts
+  for source polygons and outputs. A failed facility aborts the whole operation
+  with its name; an existing exported KMZ remains intact.
 - Polygon holes and buffer-created interior rings are filled before preview,
   sectioning, and export. Outputs are exterior-only.
 - KML/KMZ vector input bypasses JPG outline modes and uses source-vector mode.
-- `Simplify KML/KMZ output vertices` is off by default in the GUI so manually
-  drawn source vertices are preserved during export. Turn it on for dense
-  programmatic KML/KMZ shapes when smaller output polygons are preferred.
+- `Simplify output vertices` is on by default in the GUI. Turn it off to retain
+  unsimplified output geometry. When enabled, export simplifies each buffered
+  polygon (or each output section) within 5 ft geometry deviation and 1% area
+  change, retaining the original output if no acceptable reduction is found.
+  Preview-quality generation remains unsimplified; export regenerates at export
+  quality and displays that result. These limits apply independently per output,
+  rather than allowing one facility's change to cancel out another's.
 - Export remains KMZ even when the input is KML.
 - Source linework is not preserved in exported KMZs.
 - Pasted and dropped paths may be quoted; `file://` paths are normalized when
@@ -296,8 +313,13 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
   outward; branches at the same attachment read top to bottom, then left to
   right. Ordering changes names, legend order, and colors but not polygons,
   areas, overlap, buffering, or simplification.
-- Multiple-section KMZs contain one folder named from the output KMZ filename
-  stem and one polygon placemark per section, such as `Example (1 of 3)`.
+- For one source boundary, multiple-section KMZs contain one folder named from
+  the output KMZ filename stem and one placemark per section, such as `Example (1 of 3)`.
+- Multi-polygon input exports **one KMZ** with one direct child folder per
+  facility, named after that source polygon. Each contains either one boundary
+  named after the facility or sections such as `Facility (1 of 2)`. A 37-polygon
+  input with two sections per polygon produces 37 folders containing 74 polygons,
+  not separate files. Preview and export use the same deterministic colors.
 - The preview always plots the existing camera/boundary vectors and can
   optionally place Esri World Imagery behind them.
 - The preview preserves map scale instead of stretching long or narrow shapes
@@ -331,6 +353,34 @@ python -m pip install -r "C:\path\to\jpg_boundary_kmz_app\requirements_jpg_bound
 ```
 
 `tkinter` is included with most standard Python installs on Windows.
+
+## Regression testing
+
+Run the full suite from the repository root:
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
+Run the multi-polygon fixture and GUI integration checks alone:
+
+```powershell
+python -B -m unittest tests.test_multi_polygon tests.test_multi_polygon_gui -v
+```
+
+The unchanged 37-facility KMZ is stored under `tests/fixtures/kmz/`; its README
+records provenance and checksum. Tests require no external drive or network and
+write exported KMZs only to temporary directories. The matrix covers additional
+buffers of 0/100 ft, one/two sections per facility, and simplification off/on.
+
+Programmatic callers of `generate_boundary_from_input`,
+`generate_boundary_from_kmz`, `generate_boundary_from_vector_file`, and
+`generate_boundary_from_vector_geometry` receive `BoundaryResult` for a single
+boundary or `BoundaryCollectionResult` for multiple source polygons. A collection
+has ordered `children` with `source_id`, `source_name`, and individual `result`
+values, plus aggregate `metadata` and `display_results` transformed into the
+shared preview CRS. Use child results for processing metrics and exported geometry.
+`save_kmz` accepts either result type; `format_summary` accepts either metadata type.
 
 ## Sources
 

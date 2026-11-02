@@ -8,7 +8,7 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -34,7 +34,7 @@ from geometry_hardening import (
     densify_projected_geometry,
     fill_polygon_interiors,
 )
-from kml_vector_input import VectorInputError, VectorInputGeometry, load_vector_input
+from kml_vector_input import PolygonSource, VectorInputError, VectorInputGeometry, load_vector_input
 from natural_sectioning import (
     NaturalSplitDiagnostics,
     NaturalSplitError,
@@ -73,6 +73,10 @@ VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO = 0.01
 VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 14
 GENERATION_PROFILE_EXPORT = "export"
 GENERATION_PROFILE_PREVIEW = "preview"
+BOUNDARY_COLORS = (
+    "#d62728", "#2ca02c", "#1f77b4", "#9467bd", "#ff7f0e",
+    "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+)
 
 
 class BoundaryError(RuntimeError):
@@ -175,6 +179,31 @@ class BoundaryResult:
     final_polygon_wgs84: Polygon
     sections: list[BoundarySection]
     source_lines_projected: tuple[LineString, ...] = ()
+
+
+@dataclass(frozen=True)
+class BoundaryCollectionMetadata(BoundaryMetadata):
+    source_polygon_count: int = 0
+    output_polygon_count: int = 0
+    facility_summaries: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NamedBoundaryResult:
+    source_id: str
+    source_name: str
+    result: BoundaryResult
+
+
+@dataclass
+class BoundaryCollectionResult:
+    metadata: BoundaryCollectionMetadata
+    children: tuple[NamedBoundaryResult, ...]
+    # Rendering copies share one CRS; children retain their local processing CRS.
+    display_results: tuple[BoundaryResult, ...]
+
+
+BoundaryOutput = BoundaryResult | BoundaryCollectionResult
 
 
 def find_jpgs(parent_folder: Path) -> list[Path]:
@@ -374,7 +403,7 @@ def generate_boundary_from_input(
     simplify_vector_output: bool = True,
     *,
     buffer_settings: BufferSettings | None = None,
-) -> BoundaryResult:
+) -> BoundaryOutput:
     if buffer_settings is not None and buffer_settings.mode == "unified":
         buffer_ft = buffer_settings.unified_ft
     input_path = Path(input_path)
@@ -429,7 +458,7 @@ def generate_boundary_from_kmz(
     simplify_vector_output: bool = True,
     *,
     buffer_settings: BufferSettings | None = None,
-) -> BoundaryResult:
+) -> BoundaryOutput:
     kmz_path = Path(kmz_path)
     if kmz_path.suffix.lower() != ".kmz":
         raise BoundaryError(f"Input path is not a KMZ file: {kmz_path}")
@@ -457,7 +486,7 @@ def generate_boundary_from_vector_file(
     simplify_vector_output: bool = True,
     *,
     buffer_settings: BufferSettings | None = None,
-) -> BoundaryResult:
+) -> BoundaryOutput:
     try:
         vector_geometry = load_vector_input(Path(vector_path))
     except VectorInputError as exc:
@@ -480,7 +509,7 @@ def generate_boundary_from_vector_geometry(
     simplify_vector_output: bool = True,
     *,
     buffer_settings: BufferSettings | None = None,
-) -> BoundaryResult:
+) -> BoundaryOutput:
     try:
         settings = buffer_settings or BufferSettings(unified_ft=buffer_ft)
     except ValueError as exc:
@@ -509,7 +538,13 @@ def generate_boundary_from_vector_geometry(
             simplify_vector_output=simplify_vector_output,
             buffer_settings=settings,
         )
-    return _generate_boundary_from_polygon_vector(
+    if not vector_geometry.polygons_wgs84:
+        raise BoundaryError("No source polygons are available.")
+    polygon_generator = (
+        _generate_boundary_collection if len(vector_geometry.polygons_wgs84) > 1
+        else _generate_boundary_from_polygon_vector
+    )
+    return polygon_generator(
         vector_geometry,
         buffer_ft=buffer_ft,
         section_count=section_count,
@@ -518,6 +553,79 @@ def generate_boundary_from_vector_geometry(
         split_direction_deg=split_direction_deg,
         generation_profile=generation_profile,
         simplify_vector_output=simplify_vector_output,
+    )
+
+
+def _generate_boundary_collection(
+    vector_geometry: VectorInputGeometry, **options,
+) -> BoundaryCollectionResult:
+    sources = vector_geometry.polygon_sources or tuple(
+        PolygonSource(f"polygon-{i}", f"Polygon {i}", "")
+        for i in range(1, len(vector_geometry.polygons_wgs84) + 1)
+    )
+    if len(sources) != len(vector_geometry.polygons_wgs84):
+        raise BoundaryError("Polygon source metadata does not match the geometry count.")
+    children = []
+    for polygon, source in zip(vector_geometry.polygons_wgs84, sources):
+        try:
+            if polygon.is_empty or not polygon.is_valid or polygon.area <= 0:
+                raise BoundaryError("Source polygon must be valid and have positive area.")
+            child_input = replace(
+                vector_geometry, polygons_wgs84=(polygon,), polygon_sources=(source,),
+                source_name=source.name,
+                ignored_interior_ring_count=source.ignored_interior_ring_count,
+            )
+            child = _generate_boundary_from_polygon_vector(
+                child_input, **{**options, "shape_label": source.name},
+            )
+        except Exception as exc:
+            raise BoundaryError(f"Polygon {source.name!r} ({source.source_id}): {exc}") from exc
+        children.append(NamedBoundaryResult(source.source_id, source.name, child))
+
+    coords = np.concatenate([np.asarray(p.exterior.coords) for p in vector_geometry.polygons_wgs84])
+    display_epsg = detect_utm_epsg(coords[:, 1], coords[:, 0])
+    display_crs_name = CRS.from_epsg(display_epsg).name
+    display_results = tuple(_boundary_in_display_crs(child.result, display_epsg) for child in children)
+    metas = [child.result.metadata for child in children]
+    aggregate = replace(
+        metas[0], epsg=display_epsg, crs_name=display_crs_name,
+        shape_label=options["shape_label"], split_strategy="Independent source polygons",
+        selected_split_direction_deg=None,
+        vertex_count=sum(m.vertex_count for m in metas),
+        ignored_interior_ring_count=sum(m.ignored_interior_ring_count for m in metas),
+        section_area_min_acres=min(m.section_area_min_acres for m in metas),
+        section_area_max_acres=max(m.section_area_max_acres for m in metas),
+        split_area_variance_pct=max(m.split_area_variance_pct for m in metas),
+        vector_simplification_before_vertices=sum(m.vector_simplification_before_vertices for m in metas),
+        vector_simplification_after_vertices=sum(m.vector_simplification_after_vertices for m in metas),
+        vector_simplification_tolerance_ft=max(m.vector_simplification_tolerance_ft for m in metas),
+        vector_simplification_max_deviation_ft=max(m.vector_simplification_max_deviation_ft for m in metas),
+        vector_simplification_area_delta_pct=max(m.vector_simplification_area_delta_pct for m in metas),
+    )
+    metadata = BoundaryCollectionMetadata(
+        **vars(aggregate), source_polygon_count=len(children),
+        output_polygon_count=sum(len(child.result.sections) or 1 for child in children),
+        facility_summaries=tuple(
+            f"{child.source_name} [{child.source_id}]\n{format_summary(child.result.metadata)}"
+            for child in children
+        ),
+    )
+    return BoundaryCollectionResult(metadata, tuple(children), display_results)
+
+
+def _boundary_in_display_crs(result: BoundaryResult, epsg: int) -> BoundaryResult:
+    """Create a rendering view without changing processing geometry or its metrics."""
+    transformer = Transformer.from_crs(result.metadata.epsg, epsg, always_xy=True)
+    def project(polygon: Polygon) -> Polygon:
+        return transform_geometry(transformer.transform, polygon)
+    base = project(result.base_polygon_projected)
+    return replace(
+        result,
+        metadata=replace(result.metadata, epsg=epsg, crs_name=CRS.from_epsg(epsg).name),
+        projected_points=np.asarray(base.exterior.coords[:-1]),
+        base_polygon_projected=base,
+        final_polygon_projected=project(result.final_polygon_projected),
+        sections=[replace(s, polygon_projected=project(s.polygon_projected)) for s in result.sections],
     )
 
 
@@ -872,8 +980,12 @@ def _validate_section_settings(section_count: int, overlap_ft: float, split_dire
         raise BoundaryError("Split direction must be finite.")
 
 
-def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
-    if result.metadata.generation_profile != GENERATION_PROFILE_EXPORT:
+def save_kmz(result: BoundaryOutput, output_path: Path) -> Path:
+    results = (
+        [child.result for child in result.children]
+        if isinstance(result, BoundaryCollectionResult) else [result]
+    )
+    if any(item.metadata.generation_profile != GENERATION_PROFILE_EXPORT for item in [result, *results]):
         raise BoundaryError(
             "Preview-quality boundaries must be regenerated before KMZ export."
         )
@@ -886,7 +998,21 @@ def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
     output_stem = output_path.stem
     kml.document.name = output_stem
 
-    if result.sections:
+    if isinstance(result, BoundaryCollectionResult):
+        color_index = 0
+        for child in result.children:
+            folder = kml.newfolder(name=child.source_name)
+            folder.description = format_summary(child.result.metadata)
+            outputs = (
+                [(section.display_name, section.polygon_wgs84, section) for section in child.result.sections]
+                or [(child.source_name, child.result.final_polygon_wgs84, None)]
+            )
+            for name, geometry, section in outputs:
+                polygon = folder.newpolygon(name=name, outerboundaryis=_polygon_to_kml_coords(geometry))
+                polygon.description = _build_kml_description(child.result.metadata, section)
+                _style_polygon(polygon, color_index)
+                color_index += 1
+    elif result.sections:
         folder = kml.newfolder(name=output_stem)
         for section in result.sections:
             coords = _polygon_to_kml_coords(section.polygon_wgs84)
@@ -918,6 +1044,23 @@ def save_kmz(result: BoundaryResult, output_path: Path) -> Path:
 
 
 def format_summary(metadata: BoundaryMetadata) -> str:
+    if isinstance(metadata, BoundaryCollectionMetadata):
+        lines = [
+            f"Input type: {metadata.input_type} collection",
+            f"Source input: {metadata.source_folder}",
+            f"Source polygons: {metadata.source_polygon_count}",
+            f"Sections per polygon: {metadata.section_count}",
+            f"Output polygons: {metadata.output_polygon_count}",
+            "Additional buffer: " + buffer_settings_from_metadata(metadata).description,
+            f"Section overlap: {metadata.overlap_ft:,.1f} ft",
+            f"Preview CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
+            "Processing CRS: selected independently per facility",
+            f"Output polygon vertices: {metadata.vertex_count:,}",
+            f"Interior rings ignored/filled: {metadata.ignored_interior_ring_count:,}",
+            *_format_vector_simplification_lines(metadata),
+            "Simplification deviation and area-change values are maxima across facilities.",
+        ]
+        return "\n".join(lines) + "\n\n" + "\n\n".join(metadata.facility_summaries)
     lines = [
         f"Input type: {metadata.input_type}",
         f"Source input: {metadata.source_folder}",
@@ -1621,19 +1764,8 @@ def _polygon_to_kml_coords(polygon: Polygon) -> list[tuple[float, float, int]]:
 
 
 def _style_polygon(polygon, color_index: int) -> None:
-    palette = [
-        (214, 39, 40),
-        (44, 160, 44),
-        (31, 119, 180),
-        (148, 103, 189),
-        (255, 127, 14),
-        (23, 190, 207),
-        (140, 86, 75),
-        (227, 119, 194),
-        (127, 127, 127),
-        (188, 189, 34),
-    ]
-    red, green, blue = palette[color_index % len(palette)]
+    color = BOUNDARY_COLORS[color_index % len(BOUNDARY_COLORS)].lstrip("#")
+    red, green, blue = (int(color[i:i + 2], 16) for i in (0, 2, 4))
     polygon.style.linestyle.color = simplekml.Color.rgb(red, green, blue)
     polygon.style.linestyle.width = KML_LINE_WIDTH
     polygon.style.polystyle.color = simplekml.Color.rgb(red, green, blue, 45)
