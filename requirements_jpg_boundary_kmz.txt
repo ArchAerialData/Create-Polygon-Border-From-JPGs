@@ -3,6 +3,6 @@ matplotlib
 numpy
 pyproj
 scipy
-shapely
+shapely>=2.0
 simplekml
 tkinterdnd2
