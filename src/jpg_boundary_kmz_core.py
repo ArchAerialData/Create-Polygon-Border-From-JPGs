@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import html
 import io
 import math
 import os
@@ -21,11 +20,13 @@ from scipy.spatial import cKDTree
 from shapely.affinity import rotate
 from shapely.geometry import box
 from shapely.geometry import GeometryCollection, LineString, MultiPoint, MultiPolygon, Polygon
+from shapely.geometry.polygon import orient
 from shapely.ops import transform as transform_geometry
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 from buffer_settings import BufferSettings
+from export_style import BOUNDARY_COLORS, ExportStyle
 from polyline_compatibility import classify_per_side_input
 from camera_preflight import analyze_camera_preflight
 from geometry_hardening import (
@@ -67,16 +68,11 @@ BUFFER_QUAD_SEGS = DEFAULT_BUFFER_QUAD_SEGS
 BUFFER_MITRE_LIMIT = 3.0
 MAX_SECTION_COUNT = 100
 ACRES_PER_SQUARE_METER = 0.000247105381467
-KML_LINE_WIDTH = 5.0
 VECTOR_SIMPLIFY_MAX_DEVIATION_FT = 5.0
 VECTOR_SIMPLIFY_MAX_AREA_DELTA_RATIO = 0.01
 VECTOR_SIMPLIFY_SEARCH_ITERATIONS = 14
 GENERATION_PROFILE_EXPORT = "export"
 GENERATION_PROFILE_PREVIEW = "preview"
-BOUNDARY_COLORS = (
-    "#d62728", "#2ca02c", "#1f77b4", "#9467bd", "#ff7f0e",
-    "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
-)
 
 
 class BoundaryError(RuntimeError):
@@ -606,7 +602,7 @@ def _generate_boundary_collection(
         **vars(aggregate), source_polygon_count=len(children),
         output_polygon_count=sum(len(child.result.sections) or 1 for child in children),
         facility_summaries=tuple(
-            f"{child.source_name} [{child.source_id}]\n{format_summary(child.result.metadata)}"
+            f"{child.source_name} [{child.source_id}]\n{format_summary(child.result.metadata, child.result.sections)}"
             for child in children
         ),
     )
@@ -980,7 +976,10 @@ def _validate_section_settings(section_count: int, overlap_ft: float, split_dire
         raise BoundaryError("Split direction must be finite.")
 
 
-def save_kmz(result: BoundaryOutput, output_path: Path) -> Path:
+def save_kmz(result: BoundaryOutput, output_path: Path, *, style: ExportStyle | None = None) -> Path:
+    style = ExportStyle() if style is None else style
+    if not isinstance(style, ExportStyle):
+        raise BoundaryError("Export appearance must be an ExportStyle value.")
     results = (
         [child.result for child in result.children]
         if isinstance(result, BoundaryCollectionResult) else [result]
@@ -1002,15 +1001,13 @@ def save_kmz(result: BoundaryOutput, output_path: Path) -> Path:
         color_index = 0
         for child in result.children:
             folder = kml.newfolder(name=child.source_name)
-            folder.description = format_summary(child.result.metadata)
             outputs = (
-                [(section.display_name, section.polygon_wgs84, section) for section in child.result.sections]
-                or [(child.source_name, child.result.final_polygon_wgs84, None)]
+                [(section.display_name, section.polygon_wgs84) for section in child.result.sections]
+                or [(child.source_name, child.result.final_polygon_wgs84)]
             )
-            for name, geometry, section in outputs:
+            for name, geometry in outputs:
                 polygon = folder.newpolygon(name=name, outerboundaryis=_polygon_to_kml_coords(geometry))
-                polygon.description = _build_kml_description(child.result.metadata, section)
-                _style_polygon(polygon, color_index)
+                _style_polygon(polygon, color_index, style)
                 color_index += 1
     elif result.sections:
         folder = kml.newfolder(name=output_stem)
@@ -1020,16 +1017,14 @@ def save_kmz(result: BoundaryOutput, output_path: Path) -> Path:
                 name=section.display_name,
                 outerboundaryis=coords,
             )
-            polygon.description = _build_kml_description(result.metadata, section)
-            _style_polygon(polygon, section.index - 1)
+            _style_polygon(polygon, section.index - 1, style)
     else:
         coords = _polygon_to_kml_coords(result.final_polygon_wgs84)
         polygon = kml.newpolygon(
-            name="JPG Camera Boundary",
+            name=output_stem,
             outerboundaryis=coords,
         )
-        polygon.description = _build_kml_description(result.metadata)
-        _style_polygon(polygon, 0)
+        _style_polygon(polygon, 0, style)
 
     # Finish writing beside the destination before replacing an existing export.
     # Closing the handle first also lets ZipFile reopen it on Windows.
@@ -1043,7 +1038,7 @@ def save_kmz(result: BoundaryOutput, output_path: Path) -> Path:
     return output_path
 
 
-def format_summary(metadata: BoundaryMetadata) -> str:
+def format_summary(metadata: BoundaryMetadata, sections: Iterable[BoundarySection] = ()) -> str:
     if isinstance(metadata, BoundaryCollectionMetadata):
         lines = [
             f"Input type: {metadata.input_type} collection",
@@ -1054,6 +1049,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
             "Additional buffer: " + buffer_settings_from_metadata(metadata).description,
             f"Section overlap: {metadata.overlap_ft:,.1f} ft",
             f"Preview CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
+            "Export CRS: WGS84 (EPSG:4326), longitude/latitude degrees.",
             "Processing CRS: selected independently per facility",
             f"Output polygon vertices: {metadata.vertex_count:,}",
             f"Interior rings ignored/filled: {metadata.ignored_interior_ring_count:,}",
@@ -1077,6 +1073,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
                 f"Outline mode: {metadata.outline_mode or 'Not evaluated'}",
                 f"Selected strategy: {metadata.selected_strategy or 'Not evaluated'}",
                 f"Strategy confidence: {metadata.strategy_confidence:.2f}",
+                f"Concave hull ratio: {metadata.concave_ratio}",
                 f"Median camera spacing: {metadata.median_spacing_ft:,.1f} ft",
                 f"Auto smoothing distance: {metadata.smoothing_ft:,.1f} ft",
                 f"Auto containment padding: {metadata.containment_padding_ft:,.1f} ft",
@@ -1118,6 +1115,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
     lines.extend(
         [
             f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
+            "Export CRS: WGS84 (EPSG:4326), longitude/latitude degrees.",
             "Buffer distance: " + buffer_settings_from_metadata(metadata).description,
             f"Output polygon vertices: {metadata.vertex_count:,}",
         ]
@@ -1129,7 +1127,7 @@ def format_summary(metadata: BoundaryMetadata) -> str:
                 f"Section overlap: {metadata.overlap_ft:,.1f} ft",
                 f"Shape label: {metadata.shape_label}",
                 f"Split strategy: {metadata.split_strategy}",
-                "Sections connected: Yes",
+                f"Sections connected: {'Yes' if metadata.sections_connected else 'No'}",
                 (
                     "Selected split direction: Auto"
                     if metadata.selected_split_direction_deg is None
@@ -1145,6 +1143,12 @@ def format_summary(metadata: BoundaryMetadata) -> str:
         )
     else:
         lines.append("Sections: 1")
+    for section in sections:
+        lines.extend((
+            f"Section name: {section.display_name}",
+            f"Section index: {section.index} of {section.total}",
+            f"Base section area: {section.base_area_acres:,.1f} acres",
+        ))
     return "\n".join(lines)
 
 
@@ -1760,17 +1764,18 @@ def _polygon_to_kml_coords(polygon: Polygon) -> list[tuple[float, float, int]]:
         for lon, lat in polygon.exterior.coords
     ):
         raise BoundaryError("KMZ export coordinates must be finite WGS84 longitude/latitude degrees.")
-    return [(lon, lat, 0) for lon, lat in polygon.exterior.coords]
+    # KML's right-hand rule requires a counterclockwise exterior. Reverse only
+    # its serialized ordering; the footprint and generation result stay intact.
+    return [(lon, lat, 0) for lon, lat in orient(polygon, sign=1.0).exterior.coords]
 
 
-def _style_polygon(polygon, color_index: int) -> None:
-    color = BOUNDARY_COLORS[color_index % len(BOUNDARY_COLORS)].lstrip("#")
-    red, green, blue = (int(color[i:i + 2], 16) for i in (0, 2, 4))
-    polygon.style.linestyle.color = simplekml.Color.rgb(red, green, blue)
-    polygon.style.linestyle.width = KML_LINE_WIDTH
-    polygon.style.polystyle.color = simplekml.Color.rgb(red, green, blue, 45)
-    polygon.style.polystyle.fill = 0
-    polygon.style.polystyle.outline = 1
+def _style_polygon(polygon, color_index: int, style: ExportStyle | None = None) -> None:
+    style = ExportStyle() if style is None else style
+    polygon.style.linestyle.color = style.kml_color_for(color_index)
+    polygon.style.linestyle.width = style.line_width
+    polygon.style.polystyle.color = style.kml_color_for(color_index, fill=True)
+    polygon.style.polystyle.fill = int(style.mode in {"fill", "both"})
+    polygon.style.polystyle.outline = int(style.mode in {"outline", "both"})
     polygon.altitudemode = simplekml.AltitudeMode.clamptoground
 
 
@@ -2126,101 +2131,3 @@ def _ensure_polygon(geometry, fallback_points: MultiPoint | None = None) -> Poly
         if isinstance(fallback, Polygon):
             return fallback
     raise BoundaryError("Generated geometry is not polygonal.")
-
-
-def _build_kml_description(
-    metadata: BoundaryMetadata,
-    section: BoundarySection | None = None,
-) -> str:
-    lines = [
-        "Generated by JPG Boundary to KMZ.",
-        f"Input type: {metadata.input_type}",
-        f"Source input: {metadata.source_folder}",
-        f"Detected projected CRS: EPSG:{metadata.epsg} ({metadata.crs_name})",
-        "Export CRS: WGS84 (EPSG:4326), longitude/latitude degrees.",
-        "Buffer distance: " + buffer_settings_from_metadata(metadata).description,
-        f"Output polygon vertices: {metadata.vertex_count:,}",
-    ]
-    if metadata.input_type == "JPG folder":
-        lines[0] = "Generated from geotagged JPG camera positions."
-        lines.extend(
-            [
-                f"JPG/JPEG files found: {metadata.jpg_count:,}",
-                f"Usable GPS points: {metadata.gps_count:,}",
-                f"Skipped files without GPS: {metadata.skipped_count:,}",
-                f"Preflight pattern: {metadata.preflight_pattern or 'Not evaluated'}",
-                f"Preflight confidence: {metadata.preflight_confidence:.2f}",
-                f"Camera order source: {metadata.order_source or 'Not evaluated'}",
-                f"Outline mode: {metadata.outline_mode or 'Not evaluated'}",
-                f"Selected strategy: {metadata.selected_strategy or 'Not evaluated'}",
-                f"Strategy confidence: {metadata.strategy_confidence:.2f}",
-                f"Concave hull ratio: {metadata.concave_ratio}",
-                f"Median camera spacing: {metadata.median_spacing_ft:,.1f} ft",
-                f"Auto smoothing distance: {metadata.smoothing_ft:,.1f} ft",
-                f"Auto containment padding: {metadata.containment_padding_ft:,.1f} ft",
-            ]
-        )
-        if metadata.preflight_warnings:
-            lines.append(f"Preflight warnings: {metadata.preflight_warnings}")
-        if metadata.fallback_reason:
-            lines.append(f"Fallback reason: {metadata.fallback_reason}")
-        if metadata.candidate_summary:
-            lines.append(f"Candidate summary: {metadata.candidate_summary}")
-    else:
-        if metadata.source_line_count:
-            lines.extend(
-                [
-                    f"Source LineStrings: {metadata.source_line_count:,}",
-                    f"Source line coordinates: {metadata.source_point_count:,}",
-                ]
-            )
-            if metadata.source_axis_hint_deg is not None:
-                lines.append(
-                    f"Source line orientation hint: {metadata.source_axis_hint_deg:.1f} deg"
-                )
-            if metadata.ignored_polygon_count:
-                lines.append(
-                    "Using source LineStrings; polygons ignored: "
-                    f"{metadata.ignored_polygon_count:,}"
-                )
-            lines.extend(_format_polyline_auto_buffer_lines(metadata))
-        else:
-            lines.append("Source polygon: 1")
-        if metadata.ignored_interior_ring_count:
-            lines.append(
-                f"Interior rings ignored/filled: {metadata.ignored_interior_ring_count:,}"
-            )
-        if metadata.exterior_cleanup:
-            lines.append(f"Exterior cleanup: {metadata.exterior_cleanup}")
-        lines.extend(_format_vector_simplification_lines(metadata))
-    if metadata.section_count > 1:
-        lines.extend(
-            [
-                f"Sections: {metadata.section_count}",
-                f"Section overlap: {metadata.overlap_ft:,.1f} ft",
-                f"Shape label: {metadata.shape_label}",
-                f"Split strategy: {metadata.split_strategy}",
-                f"Sections connected: {'Yes' if metadata.sections_connected else 'No'}",
-                (
-                    "Selected split direction: Auto"
-                    if metadata.selected_split_direction_deg is None
-                    else f"Selected split direction: {metadata.selected_split_direction_deg:.1f} deg"
-                ),
-                f"Section area variance: {metadata.split_area_variance_pct:.1f}%",
-                (
-                    "Base section area range: "
-                    f"{metadata.section_area_min_acres:,.1f} - "
-                    f"{metadata.section_area_max_acres:,.1f} acres"
-                ),
-            ]
-        )
-    if section is not None:
-        lines.extend(
-            [
-                f"Section name: {section.display_name}",
-                f"Section index: {section.index} of {section.total}",
-                f"Base section area: {section.base_area_acres:,.1f} acres",
-            ]
-        )
-    escaped = "<br/>".join(html.escape(line) for line in lines)
-    return f"<![CDATA[{escaped}]]>"

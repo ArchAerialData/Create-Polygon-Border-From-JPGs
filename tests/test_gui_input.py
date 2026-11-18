@@ -345,7 +345,7 @@ class GuiInputTests(TestCase):
             app._set_busy(False, "KMZ exported.")
             self.assertIsNone(app._busy_after_id)
             self.assertFalse(app.activity_overlay.place_info())
-            self.assertEqual(app.export_button.cget("text"), "Export KMZ")
+            self.assertEqual(app.export_button.cget("text"), "Export")
 
     def test_export_completion_does_not_open_modal_and_links_saved_folder(self) -> None:
         with _app() as app, TemporaryDirectory() as tmp:
@@ -917,12 +917,12 @@ class GuiInputTests(TestCase):
             self.assertFalse(app._action_bar_compact)
             self.assertEqual(int(app.action_right_group.grid_info()["row"]), 0)
 
-    def test_footer_section_fields_stay_visible_and_follow_section_state(self) -> None:
+    def test_footer_section_fields_hide_until_multiple_shapes(self) -> None:
         with _app() as app:
             app.section_count_var.set("1")
             app.root.update_idletasks()
             for widget in (app.quick_overlap_entry, app.quick_shape_label_entry):
-                self.assertTrue(widget.grid_info())
+                self.assertFalse(widget.grid_info())
                 self.assertTrue(widget.instate(["disabled"]))
 
             app.section_count_var.set("2")

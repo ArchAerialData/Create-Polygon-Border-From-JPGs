@@ -48,8 +48,16 @@ Collapsing keeps your settings and closes open settings or View menus.
    needs width uses the smallest connected whole-foot buffer and shows its selected value.
    After editing settings, click `Update Preview`. The bottom bar also provides
    buffer, shape-count, overlap, and shape-label edits. These share values with
-   the settings panels; overlap and shape label activate for multiple shapes.
-4. Click `Export KMZ`. Completion appears inline, with `Open saved folder`
+   the settings panels; overlap and shape label appear for multiple shapes.
+   With one shape they are hidden while their footer space remains reserved.
+4. Click `Export` to open Export settings. Choose the filename and destination
+   with `Save as…`, edit the split-shape label when applicable, and configure
+   outline/fill colors, line width, and independent opacity percentages.
+   `Use automatic shape colors` retains the existing per-shape palette; choosing
+   a color switches to custom colors. Outline, Fill, and Both control which parts
+   are drawn. Appearance changes update the preview without rebuilding geometry.
+   Click the panel's final `Export KMZ` button to generate and save the file.
+   Completion appears inline, with `Open saved folder`
    pointing to the actual exported file's folder.
 5. Use `View` for the map legend, Focus Preview, the separate Inspector, and
    World Imagery. `Details` retains the full processing/export summary.
@@ -84,8 +92,9 @@ this preference is stored in `%LOCALAPPDATA%\JpgBoundaryToKmz\last-browse-direct
   Failed imports with no displayed result restore the browse/drop controls.
 - The header uses a single brand row. On wide windows, status, quick settings,
   export actions, and the saved-folder link share one footer row; smaller windows wrap.
-- KMZ polygons export as unfilled colored outlines with Google Earth line width
-  **5**, clamped to ground. Coordinates are always WGS84 longitude/latitude;
+- KMZ polygons default to unfilled colored outlines with Google Earth line width
+  **5**, clamped to ground. Export settings can change outline/fill colors,
+  width, opacity, and display mode. Coordinates are always WGS84 longitude/latitude;
   projected UTM coordinates are used internally for distance and area calculations.
 
 ### Optional per-side buffers
@@ -170,7 +179,7 @@ fixes, export failure protection, display checks, and regression coverage.
 Keyboard shortcuts:
 
 - `F5` or `Ctrl+Enter`: update the preview.
-- `Ctrl+E`: export the KMZ.
+- `Ctrl+E`: open Export settings (saving requires the panel's final export button).
 - `Ctrl+,`: open or close settings.
 - `Ctrl+L`: open Input & Geometry and focus the input path.
 - `Escape`: close the active overlay first, then exit Focus Preview.
@@ -275,6 +284,24 @@ python -B -m unittest tests.test_gui_basemap.LiveEsriSmokeTests -v
   a folder, `.kml`, or `.kmz` file onto the empty or compact input target.
 - The default KMZ location is the app-local `outputs` folder, so exporting does
   not require manually choosing an output path.
+- An imported KML/KMZ with one source shape, one output shape, and a unified
+  buffer defaults to `Original name - (50 ft Buffer).kmz`, using the current
+  buffer value. The suggested name follows buffer edits until manually renamed;
+  choosing another folder with the suggested filename preserves this behavior.
+  If generation automatically adjusts the buffer, Export settings reopen with
+  the corrected suggested name before saving. Review it and export again.
+  JPG folders, split shapes, multi-polygon inputs, and per-side buffers keep
+  their existing `_boundary` default.
+- A single exported shape is named after the output filename without `.kmz`.
+  Split labels and source-facility names remain configurable/preserved as before.
+  Processing descriptions are omitted from the KMZ. The app's `Details` panel
+  retains the generation and export diagnostics, including section details.
+  Desktop launches also append these diagnostics to
+  `%LOCALAPPDATA%\JpgBoundaryToKmz\generation.log` (2 MB per log, three backups).
+  If that log cannot be opened, the app reports it and keeps Details available.
+- Exported polygon exteriors use counterclockwise winding as required by KML.
+  See the [Google Earth outline investigation](docs/export-outline-investigation.md)
+  for the evidence and remaining visual verification of the reported width variation.
 - Editing `Output file name` keeps the current output folder and updates the
   final `.kmz` path.
 - `View Output Folder` opens the directory for the current or just-exported
@@ -381,6 +408,12 @@ has ordered `children` with `source_id`, `source_name`, and individual `result`
 values, plus aggregate `metadata` and `display_results` transformed into the
 shared preview CRS. Use child results for processing metrics and exported geometry.
 `save_kmz` accepts either result type; `format_summary` accepts either metadata type.
+Programmatic callers can retain diagnostics outside the KMZ with
+`format_summary(result.metadata, getattr(result, "sections", ()))`; persistent
+logging is initialized by the desktop app, not by the core library.
+
+See [export settings validation](docs/export-settings-validation.md) for the
+November 2026 checks and the remaining Google Earth visual-verification limit.
 
 ## Sources
 

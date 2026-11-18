@@ -1,6 +1,7 @@
 exifread
 matplotlib
 numpy
+pillow
 pyproj
 scipy
 shapely>=2.0

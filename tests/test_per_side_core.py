@@ -58,8 +58,10 @@ class PerSideCoreTests(TestCase):
                                 output = save_kmz(result, Path(tmp) / "output.kmz")
                                 with ZipFile(output) as archive:
                                     xml = archive.read("doc.kml")
-                                self.assertIn(b"Left 350 ft / Right 150 ft", xml)
+                                self.assertIn("Left 350 ft / Right 150 ft",
+                                              format_summary(result.metadata, result.sections))
                                 root = ET.fromstring(xml)
+                                self.assertEqual(root.findall(".//{*}description"), [])
                                 rings = root.findall(".//{*}Polygon/{*}outerBoundaryIs/{*}LinearRing/{*}coordinates")
                                 self.assertEqual(len(rings), count)
                                 transform = Transformer.from_crs(4326, result.metadata.epsg, always_xy=True)

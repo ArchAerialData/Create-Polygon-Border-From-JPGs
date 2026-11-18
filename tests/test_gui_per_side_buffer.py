@@ -187,6 +187,7 @@ class GuiPerSideBufferTests(TestCase):
                 app.root.lift()
                 app.root.update()
                 app._compatibility=PolylineCompatibility(True,"eligible","ok",1)
+                app.section_count_var.set("2")
                 app._refresh_buffer_controls()
                 for _ in range(4):
                     app.quick_per_side_checkbutton.invoke()

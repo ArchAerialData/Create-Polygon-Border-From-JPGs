@@ -567,6 +567,8 @@ def _configure_base_styles(style: ttk.Style) -> None:
 
 
 def _configure_frame_styles(style: ttk.Style) -> None:
+    style.configure("Surface.TLabelframe", background=PALETTE.SURFACE, bordercolor=PALETTE.BORDER)
+    style.configure("Surface.TLabelframe.Label", background=PALETTE.SURFACE, foreground=PALETTE.TEXT_SECONDARY)
     style.configure("Brand.TFrame", background=PALETTE.BRAND)
     style.configure("TFrame", background=PALETTE.BACKGROUND)
     style.configure(
@@ -809,6 +811,7 @@ def _configure_checkbutton_style(style: ttk.Style) -> None:
         ("TCheckbutton", PALETTE.BACKGROUND),
         ("App.TCheckbutton", PALETTE.BACKGROUND),
         ("Surface.TCheckbutton", PALETTE.SURFACE),
+        ("Surface.TRadiobutton", PALETTE.SURFACE),
     ):
         style.configure(
             style_name,
