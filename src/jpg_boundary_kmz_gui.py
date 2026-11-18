@@ -11,7 +11,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 from urllib.parse import unquote, urlparse
 
 from matplotlib import patheffects
@@ -20,6 +20,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from buffer_settings import BufferSettings, seed_side_fields
+from export_style import ExportStyle
+from generation_log import configure_generation_log, generation_logger
 from kml_vector_input import load_vector_input
 from polyline_compatibility import PolylineCompatibility, classify_per_side_input, source_identity
 
@@ -195,6 +197,16 @@ class BoundaryKmzApp:
         self._queue_after_id = None
         self.output_name_var = tk.StringVar(master=self.root, value=default_output_path.stem)
         self.output_var = tk.StringVar(master=self.root, value=str(default_output_path))
+        self._automatic_output_name = default_output_path.stem
+        self._output_name_automatic = True
+        self.export_mode_var = tk.StringVar(master=self.root, value="outline")
+        self.export_palette_var = tk.BooleanVar(master=self.root, value=True)
+        self.export_line_color_var = tk.StringVar(master=self.root, value=BOUNDARY_COLORS[0])
+        self.export_fill_color_var = tk.StringVar(master=self.root, value=BOUNDARY_COLORS[0])
+        self.export_line_width_var = tk.StringVar(master=self.root, value="5")
+        self.export_line_opacity_var = tk.StringVar(master=self.root, value="100")
+        self.export_fill_opacity_var = tk.StringVar(master=self.root, value="100")
+        self._preview_export_style = ExportStyle()
         self.outline_mode_var = tk.StringVar(master=self.root, value="Auto")
         self.section_count_var = tk.StringVar(master=self.root, value="1")
         self.overlap_var = tk.StringVar(master=self.root, value="50")
@@ -327,6 +339,11 @@ class BoundaryKmzApp:
         self.right_buffer_var.trace_add("write", self._on_side_buffer_changed)
         self.world_imagery_var.trace_add("write", self._on_world_imagery_toggled)
         self.input_polylines_var.trace_add("write", self._on_input_polylines_toggled)
+        for variable in (self.export_mode_var, self.export_palette_var,
+                         self.export_line_color_var, self.export_fill_color_var,
+                         self.export_line_width_var, self.export_line_opacity_var,
+                         self.export_fill_opacity_var):
+            variable.trace_add("write", self._on_export_style_changed)
         self._update_outline_mode_state()
         self._update_section_control_state()
         self._refresh_input_shell_state()
@@ -1449,7 +1466,7 @@ class BoundaryKmzApp:
             ToolTip(self.sections_settings_button, "Shape count, overlap, labels, and split direction."),
             ToolTip(self.output_settings_button, "Name your KMZ and choose where to save it."),
             ToolTip(self.scan_button, "Build or refresh the preview · F5 or Ctrl+Enter"),
-            ToolTip(self.export_button, "Generate and save the KMZ using the current settings · Ctrl+E"),
+            ToolTip(self.export_button, "Choose export name, location, labels, and appearance · Ctrl+E"),
             ToolTip(self.per_side_checkbutton, "Copy the current buffer to each side; 0 starts at 200 ft per side. Left/right follows the source arrows."),
             ToolTip(self.quick_per_side_checkbutton, "Copy the current buffer to each side; 0 starts at 200 ft per side. Left/right follows the source arrows."),
             ToolTip(self.left_buffer_entry, "Distance to the left when following each source line's direction arrows."),
@@ -1531,6 +1548,12 @@ class BoundaryKmzApp:
             "output",
             self._build_output_settings,
         )
+        self.confirm_export_button = ttk.Button(
+            self.settings_drawer, text="Export KMZ", style="Success.TButton",
+            command=self._export_clicked,
+        )
+        self.confirm_export_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.confirm_export_button.grid_remove()
         self._refresh_drawer_summaries()
         self._bind_local_mousewheel_tree(
             self.settings_drawer,
@@ -1662,6 +1685,112 @@ class BoundaryKmzApp:
         self.view_output_button = ttk.Button(
             output_buttons, text="Open folder", style="Ghost.TButton", command=self._view_output_folder)
         self.view_output_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.output_shape_label_entry = ttk.Entry(
+            parent, textvariable=self.shape_label_var, style="App.TEntry")
+        self.output_shape_label_label = self._settings_field(
+            parent, 5, "Split shape label", self.output_shape_label_entry)
+        self.output_label_hint = ttk.Label(parent, style="Muted.TLabel", wraplength=340)
+        self.output_label_hint.grid(row=7, column=0, sticky="ew", pady=(0, 10))
+        appearance = ttk.LabelFrame(parent, text="Appearance", padding=10, style="Surface.TLabelframe")
+        appearance.grid(row=8, column=0, sticky="ew", pady=(12, 0))
+        appearance.columnconfigure(1, weight=1)
+        modes = ttk.Frame(appearance, style="Card.TFrame")
+        modes.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self._export_style_widgets = []
+        for column, (label, value) in enumerate((("Outline", "outline"), ("Fill", "fill"), ("Both", "both"))):
+            radio = ttk.Radiobutton(modes, text=label, variable=self.export_mode_var, value=value,
+                                    style="Surface.TRadiobutton")
+            radio.grid(row=0, column=column, padx=(0, 12))
+            self._export_style_widgets.append(radio)
+        self.export_palette_checkbutton = ttk.Checkbutton(
+            appearance, text="Use automatic shape colors", variable=self.export_palette_var,
+            style="Surface.TCheckbutton")
+        self.export_palette_checkbutton.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        self._export_style_widgets.append(self.export_palette_checkbutton)
+        self._export_color_widgets = []
+        for row, (label, variable) in enumerate((("Outline color", self.export_line_color_var),
+                                                ("Fill color", self.export_fill_color_var)), start=2):
+            ttk.Label(appearance, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8))
+            entry = ttk.Entry(appearance, textvariable=variable, width=10, style="App.TEntry")
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            button = ttk.Button(appearance, text="Choose…", style="Secondary.TButton",
+                                command=lambda var=variable: self._choose_export_color(var))
+            button.grid(row=row, column=2, padx=(6, 0))
+            self._export_color_widgets.append(entry)
+            self._export_style_widgets.extend((entry, button))
+        for row, (label, variable) in enumerate((("Line width (px)", self.export_line_width_var),
+                                                ("Outline opacity (%)", self.export_line_opacity_var),
+                                                ("Fill opacity (%)", self.export_fill_opacity_var)), start=4):
+            ttk.Label(appearance, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8))
+            entry = ttk.Entry(appearance, textvariable=variable, width=8, style="App.TEntry")
+            entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+            self._export_style_widgets.append(entry)
+        self.export_style_error_var = tk.StringVar(master=self.root)
+        ttk.Label(appearance, textvariable=self.export_style_error_var, style="Muted.TLabel",
+                  wraplength=320).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self._update_export_style_controls()
+
+    def _open_export_settings(self) -> None:
+        if self._busy:
+            return
+        if not self._settings_drawer_open or self._active_settings_group != "output":
+            self._toggle_settings_panel("output")
+        self.output_name_entry.focus_set()
+        self.output_name_entry.selection_range(0, "end")
+
+    def _read_export_style(self) -> ExportStyle:
+        try:
+            return ExportStyle(
+                mode=self.export_mode_var.get(),
+                line_color=None if self.export_palette_var.get() else self.export_line_color_var.get(),
+                fill_color=None if self.export_palette_var.get() else self.export_fill_color_var.get(),
+                line_width=float(self.export_line_width_var.get()),
+                line_opacity=float(self.export_line_opacity_var.get()),
+                fill_opacity=float(self.export_fill_opacity_var.get()),
+            )
+        except (ValueError, TypeError) as error:
+            raise BoundaryError(f"Invalid export appearance: {error}") from error
+
+    def _choose_export_color(self, variable: tk.StringVar) -> None:
+        if self._busy:
+            return
+        initial = variable.get()
+        try:
+            self.root.winfo_rgb(initial)
+        except tk.TclError:
+            initial = BOUNDARY_COLORS[0]
+        color = colorchooser.askcolor(color=initial, title="Choose shape color", parent=self.root)[1]
+        if color:
+            variable.set(color)
+            self.export_palette_var.set(False)
+
+    def _update_export_style_controls(self) -> None:
+        for widget in self._export_style_widgets:
+            widget.configure(state="disabled" if self._busy else "normal")
+        for widget in self._export_color_widgets:
+            widget.configure(state="disabled" if self._busy or self.export_palette_var.get() else "normal")
+
+    def _on_export_style_changed(self, *_args: object) -> None:
+        self._update_export_style_controls()
+        try:
+            self._preview_export_style = self._read_export_style()
+        except BoundaryError as error:
+            self.export_style_error_var.set(str(error))
+            return
+        self.export_style_error_var.set("")
+        # Appearance is independent of geometry. Update artists in place so
+        # zoom, basemap requests, cached geometry, and preview currency survive.
+        for surface in self._active_map_surfaces():
+            self._apply_export_style_to_axes(surface.axes)
+            boundary_indices = {line.get_label(): line._export_color_index
+                                for line in surface.axes.lines if hasattr(line, "_export_color_index")}
+            surface.key_entries = tuple(
+                self._export_legend_entry(entry[0], boundary_indices[entry[0]])
+                if entry[0] in boundary_indices else entry for entry in surface.key_entries)
+            content = (self.preview_key_content if surface is self._main_map_surface
+                       else self._fullscreen_key_content)
+            self._update_preview_key(content, list(surface.key_entries))
+            surface.canvas.draw_idle()
 
     def _build_preview_key_overlay(self, parent: ttk.Frame) -> None:
         self.preview_key_overlay = ttk.Frame(
@@ -1758,9 +1887,11 @@ class BoundaryKmzApp:
             width=4, style="Compact.App.TSpinbox")
         self.quick_section_count_spinbox.grid(row=0, column=1)
         group, self.quick_overlap_label = quick_field("Overlap (ft)")
+        self._quick_split_groups = [group]
         self.quick_overlap_entry = ttk.Entry(group, textvariable=self.overlap_var, width=6, style="Compact.App.TEntry")
         self.quick_overlap_entry.grid(row=0, column=1)
         group, self.quick_shape_label_label = quick_field("Shape label")
+        self._quick_split_groups.append(group)
         self.quick_shape_label_entry = ttk.Entry(group, textvariable=self.shape_label_var, width=18, style="Compact.App.TEntry")
         self.quick_shape_label_entry.grid(row=0, column=1)
 
@@ -1789,9 +1920,9 @@ class BoundaryKmzApp:
         self.scan_button.grid(row=0, column=2, padx=(0, 8))
         self.export_button = ttk.Button(
             self.action_right_group,
-            text="Export KMZ",
+            text="Export",
             style="Success.TButton",
-            command=self._export_clicked,
+            command=self._open_export_settings,
         )
         self.export_button.grid(row=0, column=3)
         self.export_destination_label = ttk.Label(
@@ -1808,6 +1939,9 @@ class BoundaryKmzApp:
 
         self._populate_widget_state_registries()
         self.root.update_idletasks()
+        for group in self._quick_split_groups:
+            group.configure(width=group.winfo_reqwidth(), height=group.winfo_reqheight())
+            group.grid_propagate(False)
         self._refresh_action_bar_layout()
 
     def _populate_widget_state_registries(self) -> None:
@@ -1824,6 +1958,7 @@ class BoundaryKmzApp:
             self.split_direction_custom_entry,
             self.output_name_entry,
             self.output_path_entry,
+            self.output_shape_label_entry,
             self.quick_buffer_entry,
             self.per_side_checkbutton, self.quick_per_side_checkbutton,
             self.left_buffer_entry, self.right_buffer_entry,
@@ -1831,6 +1966,7 @@ class BoundaryKmzApp:
             self.quick_section_count_spinbox,
             self.quick_overlap_entry,
             self.quick_shape_label_entry,
+            *self._export_style_widgets,
         ]
         self._busy_action_widgets = [
             self.change_input_button,
@@ -1842,6 +1978,7 @@ class BoundaryKmzApp:
             self.view_output_button,
             self.scan_button,
             self.export_button,
+            self.confirm_export_button,
         ]
         self._section_multiple_widgets = [
             self.overlap_label,
@@ -1852,6 +1989,8 @@ class BoundaryKmzApp:
             self.quick_shape_label_entry,
             self.shape_label_label,
             self.shape_label_entry,
+            self.output_shape_label_label,
+            self.output_shape_label_entry,
             self.split_direction_label,
             self.split_direction_combo,
         ]
@@ -1880,6 +2019,10 @@ class BoundaryKmzApp:
                 frame.grid()
             else:
                 frame.grid_remove()
+        if group == "output":
+            self.confirm_export_button.grid()
+        else:
+            self.confirm_export_button.grid_remove()
         self.settings_canvas.yview_moveto(0)
         self.settings_canvas.after_idle(lambda: self._update_settings_scrollregion(None))
         self._refresh_settings_triggers()
@@ -2177,6 +2320,12 @@ class BoundaryKmzApp:
         if not hasattr(self, "action_left_group"):
             return
         self.root.update_idletasks()
+        for group in self._quick_split_groups:
+            children = group.winfo_children()
+            # Measure children even while hidden; retain the slot at the current
+            # font/DPI size so showing it cannot shift neighboring controls.
+            group.configure(width=sum(widget.winfo_reqwidth() for widget in children) + 6,
+                            height=max(widget.winfo_reqheight() for widget in children))
         current_width = width or self.root.winfo_width()
         # Output names remain in Output settings and the saved status. Avoid an
         # otherwise empty footer row just for a repeated filename.
@@ -2306,7 +2455,7 @@ class BoundaryKmzApp:
 
     def _shortcut_export(self, _event: object = None) -> str:
         if not self._busy:
-            self._export_clicked()
+            self._open_export_settings()
         return "break"
 
     def _shortcut_toggle_settings(self, _event: object = None) -> str:
@@ -3014,8 +3163,13 @@ class BoundaryKmzApp:
         else:
             subprocess.Popen(["xdg-open", str(folder)])
 
-    def _set_output_path(self, output_path: Path, *, sync_name: bool = True) -> None:
+    def _set_output_path(self, output_path: Path, *, sync_name: bool = True,
+                         automatic: bool | None = None) -> None:
         output_path = Path(output_path)
+        if automatic is not None:
+            self._output_name_automatic = automatic
+        elif sync_name:
+            self._output_name_automatic = output_path.stem == self._automatic_output_name
         self._updating_output_fields = True
         try:
             self.output_var.set(str(output_path))
@@ -3042,6 +3196,9 @@ class BoundaryKmzApp:
     def _on_output_changed(self, *_args: object) -> None:
         if self._updating_output_fields:
             return
+        output_text = self.output_var.get().strip()
+        self._output_name_automatic = bool(
+            output_text and self._resolve_output_path(output_text).stem == self._automatic_output_name)
         self._sync_output_name_from_path()
         self._refresh_shape_label_default()
         self._invalidate_cache()
@@ -3051,6 +3208,7 @@ class BoundaryKmzApp:
     def _on_output_name_changed(self, *_args: object) -> None:
         if self._updating_output_fields:
             return
+        self._output_name_automatic = False
 
         output_name = self.output_name_var.get().strip()
         if not output_name:
@@ -3130,6 +3288,7 @@ class BoundaryKmzApp:
             self._refresh_buffer_controls()
         self._invalidate_cache()
         self._mark_preview_stale("Buffer mode changed.")
+        self._refresh_output_default()
         self._refresh_drawer_summaries()
         if location == "footer":
             entry = self.quick_left_buffer_entry if self.per_side_var.get() else self.quick_buffer_entry
@@ -3189,6 +3348,7 @@ class BoundaryKmzApp:
         if self.per_side_var.get() or self._updating_buffer_mode:
             return
         self._invalidate_cache()
+        self._refresh_output_default()
         self._mark_preview_stale("Buffer changed.")
         self._refresh_drawer_summaries()
 
@@ -3199,6 +3359,7 @@ class BoundaryKmzApp:
 
     def _on_section_options_changed(self, *_args: object) -> None:
         self._update_section_control_state()
+        self._refresh_output_default()
         self._refresh_shape_label_default()
         self._invalidate_cache()
         self._mark_preview_stale("Section settings changed.")
@@ -3245,8 +3406,27 @@ class BoundaryKmzApp:
         self.quick_section_count_label.configure(text="Sections per polygon" if multi_polygon else "Shapes")
         if multi_polygon:
             for widget in (self.shape_label_label, self.shape_label_entry,
-                           self.quick_shape_label_label, self.quick_shape_label_entry):
+                           self.quick_shape_label_label, self.quick_shape_label_entry,
+                           self.output_shape_label_label, self.output_shape_label_entry):
                 widget.configure(state="disabled")
+        for group in self._quick_split_groups:
+            for widget in group.winfo_children():
+                if multiple_sections:
+                    widget.grid()
+                else:
+                    if widget is self.root.focus_get():
+                        self.quick_section_count_spinbox.focus_set()
+                    widget.grid_remove()
+        for widget in (self.output_shape_label_label, self.output_shape_label_entry):
+            if multiple_sections:
+                widget.grid()
+            else:
+                widget.grid_remove()
+        self.output_label_hint.configure(text=(
+            "Each source polygon keeps its facility name." if multi_polygon else
+            "Sections use this label followed by (1 of N), (2 of N), …" if multiple_sections else
+            "The shape name matches the file name."
+        ))
         custom_enabled = enabled and self.split_direction_var.get() == "Custom"
         custom_state = "normal" if custom_enabled else "disabled"
         custom_widgets = self._custom_direction_widgets or [
@@ -3391,6 +3571,7 @@ class BoundaryKmzApp:
                 simplify_vector_output,
                 output_path,
             ) = self._read_inputs(require_output=True)
+            style = self._read_export_style()
         except BoundaryError as error:
             messagebox.showerror("Invalid input", str(error), parent=self.root)
             return
@@ -3437,6 +3618,7 @@ class BoundaryKmzApp:
                 cached_result,
                 request,
             ),
+            kwargs={"style": style, "automatic_name": self._output_name_automatic},
             daemon=True,
         )
         worker.start()
@@ -3499,6 +3681,7 @@ class BoundaryKmzApp:
         shape_label: str, outline_mode: str, split_direction_deg: float | None,
         simplify_vector_output: bool, output_path: Path,
         cached_result: BoundaryOutput | None, request: _GeometryRequest,
+        *, style: ExportStyle | None = None, automatic_name: bool = False,
     ) -> None:
         try:
             if source_identity(input_path) != request.identity:
@@ -3508,7 +3691,20 @@ class BoundaryKmzApp:
                 outline_mode=outline_mode, split_direction_deg=split_direction_deg,
                 generation_profile=GENERATION_PROFILE_EXPORT,
                 simplify_vector_output=simplify_vector_output)
-            saved_path = save_kmz(result, output_path)
+            if automatic_name:
+                suggested = self._default_output_path(
+                    input_path, result.metadata.buffer_ft or 0, section_count,
+                    per_side=result.metadata.buffer_mode == "per_side",
+                    source_polygon_count=(result.metadata.source_polygon_count
+                                          if isinstance(result, BoundaryCollectionResult) else 0))
+                effective_path = output_path.parent / suggested.name
+                if effective_path != output_path:
+                    # Automatic line buffering may change the distance. Let the
+                    # user review the real filename before any file is written;
+                    # the next export reuses this completed export-quality result.
+                    self._queue.put(("export_review", _WorkerMessage(request, (result, effective_path))))
+                    return
+            saved_path = save_kmz(result, output_path, style=style)
         except Exception as error:
             self._queue.put(("error", _WorkerMessage(request, error)))
             return
@@ -3558,12 +3754,21 @@ class BoundaryKmzApp:
                 self._refresh_buffer_controls()
                 self._refresh_drawer_summaries()
                 continue
-            if kind == "scan_done":
-                result = payload
+            if kind in {"scan_done", "export_review"}:
+                review_path = None
+                if kind == "export_review":
+                    result, review_path = payload
+                else:
+                    result = payload
                 assert isinstance(result, (BoundaryResult, BoundaryCollectionResult))
                 settings_match = request is None or request.control_signature == self._preview_control_signature()
                 if settings_match:
                     self._sync_effective_buffer(result)
+                    if review_path is not None:
+                        self._source_polygon_count = (result.metadata.source_polygon_count
+                            if isinstance(result, BoundaryCollectionResult) else 0)
+                        self._automatic_output_name = review_path.stem
+                        self._set_output_path(review_path, automatic=True)
                 self._cached_result = result
                 self._cached_source_identity = identity
                 self._cached_settings = self._settings_key(
@@ -3577,7 +3782,7 @@ class BoundaryKmzApp:
                     result.metadata.generation_profile,
                     simplify_vector_output=result.metadata.vector_simplification_enabled,
                 )
-                self._write_status(format_summary(result.metadata))
+                self._write_status(format_summary(result.metadata, getattr(result, "sections", ())))
                 self._draw_preview(result)
                 self._last_displayed_result = result
                 self._mark_result_settings(request, settings_match)
@@ -3585,6 +3790,9 @@ class BoundaryKmzApp:
                 self._set_fullscreen_status(
                     self._ready_status(result, "Preview ready.")
                 )
+                if review_path is not None:
+                    self.status_var.set("Output settings adjusted to the generated boundary. Review the filename, then export.")
+                    self._open_export_settings()
             elif kind == "export_done":
                 result, saved_path = payload
                 assert isinstance(result, (BoundaryResult, BoundaryCollectionResult))
@@ -3606,7 +3814,7 @@ class BoundaryKmzApp:
                     simplify_vector_output=result.metadata.vector_simplification_enabled,
                 )
                 self._write_status(
-                    format_summary(result.metadata)
+                    format_summary(result.metadata, getattr(result, "sections", ()))
                     + f"\n\nSaved KMZ: {saved_path}"
                 )
                 self._draw_preview(result)
@@ -3713,7 +3921,10 @@ class BoundaryKmzApp:
         output_path: Path | None = None
         output_text = self.output_var.get().strip()
         if not output_text:
-            current_output_path = self._default_output_path(input_path)
+            current_output_path = self._default_output_path(
+                input_path, buffer_ft=settings.unified_ft or 0, section_count=section_count,
+                per_side=settings.mode == "per_side", source_polygon_count=self._source_polygon_count)
+            self._automatic_output_name = current_output_path.stem
             self._set_output_path(current_output_path)
         else:
             current_output_path = self._resolve_output_path(output_text)
@@ -3766,9 +3977,12 @@ class BoundaryKmzApp:
         )
 
     def _draw_preview(self, result: BoundaryOutput) -> None:
+        previous_polygon_count = self._source_polygon_count
         self._source_polygon_count = (
             result.metadata.source_polygon_count if isinstance(result, BoundaryCollectionResult) else 0
         )
+        if previous_polygon_count != self._source_polygon_count:
+            self._refresh_output_default()
         self._update_section_control_state()
         self._update_fullscreen_control_state()
         self._refresh_drawer_summaries()
@@ -3877,33 +4091,13 @@ class BoundaryKmzApp:
                 self._style_preview_vector_artist(parent_line, 1.4)
                 key_entries.append(("Parent outline", "#9ca3af", "--", 1.4))
                 for section in result.sections:
-                    color = BOUNDARY_COLORS[(section.index - 1) % len(BOUNDARY_COLORS)]
-                    sx, sy = self._preview_polygon_xy(section.polygon_projected)
-                    section_line = axes.plot(
-                        sx,
-                        sy,
-                        color=color,
-                        linewidth=1.8,
-                        label=section.display_name,
-                        zorder=22,
-                    )[0]
-                    self._style_preview_vector_artist(section_line, 1.8)
-                    axes.fill(sx, sy, color=color, alpha=0.08, zorder=10)
-                    key_entries.append((section.display_name, color, "-", 1.8))
+                    key_entries.append(self._plot_export_polygon(
+                        axes, section.polygon_projected, section.display_name, section.index - 1))
             else:
-                x, y = self._preview_polygon_xy(result.final_polygon_projected)
-                boundary_line = axes.plot(
-                    x,
-                    y,
-                    color="#d62728",
-                    linewidth=2.0,
-                    label="KMZ boundary",
-                    zorder=22,
-                )[0]
-                self._style_preview_vector_artist(boundary_line, 2.0)
-                axes.fill(x, y, color="#d62728", alpha=0.08, zorder=10)
-                key_entries.append(("KMZ boundary", "#d62728", "-", 2.0))
+                key_entries.append(self._plot_export_polygon(
+                    axes, result.final_polygon_projected, "KMZ boundary", 0))
 
+        self._apply_export_style_to_axes(axes)
         self._fit_preview_axes_to_result(result, axes)
         axes.set_aspect("equal", adjustable="datalim")
         axes.set_axis_off()
@@ -3947,15 +4141,42 @@ class BoundaryKmzApp:
                 or [(child.source_name, display.final_polygon_projected)]
             )
             for name, polygon in outputs:
-                color = BOUNDARY_COLORS[color_index % len(BOUNDARY_COLORS)]
-                x, y = self._preview_polygon_xy(polygon)
-                line = axes.plot(x, y, color=color, linewidth=1.8, label=name, zorder=22)[0]
-                line.set_gid(f"boundary-{child.source_id}-{color_index}")
-                self._style_preview_vector_artist(line, 1.8)
-                axes.fill(x, y, color=color, alpha=0.08, zorder=10)
-                entries.append((name, color, "-", 1.8))
+                entries.append(self._plot_export_polygon(
+                    axes, polygon, name, color_index, gid=f"boundary-{child.source_id}-{color_index}"))
                 color_index += 1
         return entries
+
+    def _plot_export_polygon(self, axes, polygon, name: str, color_index: int,
+                             *, gid: str | None = None) -> tuple[str, str, str, float]:
+        x, y = self._preview_polygon_xy(polygon)
+        line = axes.plot(x, y, label=name, zorder=22)[0]
+        line.set_gid(gid or f"boundary-{color_index}")
+        fill = axes.fill(x, y, linewidth=0, zorder=10)[0]
+        fill.set_gid(f"boundary-fill-{color_index}")
+        line._export_color_index = fill._export_color_index = color_index
+        return self._export_legend_entry(name, color_index)
+
+    def _export_legend_entry(self, name: str, color_index: int) -> tuple[str, str, str, float]:
+        style = self._preview_export_style
+        fill_only = style.mode == "fill"
+        return name, style.color_for(color_index, fill=fill_only), "fill" if fill_only else "-", style.line_width
+
+    def _apply_export_style_to_axes(self, axes) -> None:
+        style = self._preview_export_style
+        for line in axes.lines:
+            index = getattr(line, "_export_color_index", None)
+            if index is not None:
+                line.set_color(style.color_for(index))
+                line.set_linewidth(style.line_width * 72.0 / axes.figure.dpi)
+                line.set_alpha(style.line_opacity / 100.0)
+                line.set_visible(style.mode in {"outline", "both"})
+                line.set_path_effects([])
+        for patch in axes.patches:
+            index = getattr(patch, "_export_color_index", None)
+            if index is not None:
+                patch.set_facecolor(style.color_for(index, fill=True))
+                patch.set_alpha(style.fill_opacity / 100.0)
+                patch.set_visible(style.mode in {"fill", "both"})
 
     @staticmethod
     def _style_preview_vector_artist(artist: object, linewidth: float) -> None:
@@ -4012,6 +4233,8 @@ class BoundaryKmzApp:
             style_tk_canvas(swatch, surface="surface")
             if line_style == "point":
                 swatch.create_oval(17, 6, 25, 14, fill=color, outline=color)
+            elif line_style == "fill":
+                swatch.create_rectangle(4, 3, 38, 15, fill=color, outline="")
             else:
                 dash = self._preview_key_dash(line_style)
                 line_options: dict[str, object] = {
@@ -4939,6 +5162,7 @@ class BoundaryKmzApp:
                 pass
 
     def _write_status(self, text: str) -> None:
+        generation_logger.info(text)
         self._details_text = text
         self.details_button.configure(state="normal" if text.strip() else "disabled")
 
@@ -5000,7 +5224,7 @@ class BoundaryKmzApp:
                 self.root.after_cancel(self._busy_after_id)
             self._refresh_activity()
             self.scan_button.configure(text="Building…" if "Export" not in status else "Update Preview")
-            self.export_button.configure(text="Exporting…" if "Export" in status else "Export KMZ")
+            self.export_button.configure(text="Exporting…" if "Export" in status else "Export")
             self.open_export_button.grid_remove()
             self._preview_error = ""
             for widget in (
@@ -5022,7 +5246,7 @@ class BoundaryKmzApp:
                 self._busy_after_id = None
             self.activity_overlay.place_forget()
             self.scan_button.configure(text="Update Preview")
-            self.export_button.configure(text="Export KMZ")
+            self.export_button.configure(text="Export")
             self.busy_progress.stop()
             self.busy_progress.grid_remove()
             for widget in self._all_mutation_widgets:
@@ -5060,6 +5284,7 @@ class BoundaryKmzApp:
         self.status_var.set(status)
         self._refresh_preview_state_badge()
         self._refresh_input_shell_state()
+        self._update_export_style_controls()
         self._refresh_action_bar_layout()
 
     def _invalidate_cache(self) -> None:
@@ -5086,7 +5311,8 @@ class BoundaryKmzApp:
         self.parent_var.set(str(input_path))
         self.buffer_var.set("0")
         self.outline_mode_var.set("Auto")
-        self._set_output_path(self._default_output_path(input_path))
+        self._output_name_automatic = True
+        self._refresh_output_default(reset_folder=True)
         self._update_outline_mode_state()
         self._invalidate_cache()
         self._scan_clicked()
@@ -5240,7 +5466,9 @@ class BoundaryKmzApp:
         return outline_mode
 
     @staticmethod
-    def _default_output_path(input_path: Path | None = None) -> Path:
+    def _default_output_path(input_path: Path | None = None, buffer_ft: float = 0,
+                             section_count: int = 1, *, per_side: bool = False,
+                             source_polygon_count: int = 0) -> Path:
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         if input_path is None:
             output_name = "jpg_camera_boundary.kmz"
@@ -5248,10 +5476,42 @@ class BoundaryKmzApp:
             path = Path(input_path)
             folder_name = path.stem if path.is_file() else path.name
             folder_name = folder_name or "jpg_camera_boundary"
-            output_name = (
-                f"{BoundaryKmzApp._safe_filename_stem(folder_name)}_boundary.kmz"
-            )
+            stem = BoundaryKmzApp._safe_filename_stem(folder_name)
+            if (BoundaryKmzApp._is_vector_file_path(path) and section_count == 1
+                    and not per_side and source_polygon_count <= 1):
+                # Use the round-trip float representation, without a trailing
+                # .0, so fractional buffers aren't rounded to a different value.
+                distance = str(float(buffer_ft))
+                if distance.endswith(".0"):
+                    distance = distance[:-2]
+                output_name = f"{stem} - ({distance} ft Buffer).kmz"
+            else:
+                output_name = f"{stem}_boundary.kmz"
         return DEFAULT_OUTPUT_DIR / output_name
+
+    def _refresh_output_default(self, *, reset_folder: bool = False) -> None:
+        if not self._output_name_automatic:
+            return
+        input_text = self.parent_var.get().strip()
+        if not input_text:
+            return
+        try:
+            distance = float(self.buffer_var.get())
+            count = int(self.section_count_var.get())
+        except ValueError:
+            return  # Leave the suggestion intact during incomplete edits.
+        if not math.isfinite(distance) or distance < 0 or not 1 <= count <= MAX_SECTION_COUNT:
+            return
+        suggested = self._default_output_path(
+            self._path_from_text(input_text), distance, count,
+            per_side=self.per_side_var.get(), source_polygon_count=self._source_polygon_count)
+        output_text = self.output_var.get().strip()
+        folder = (self._resolve_output_path(output_text).parent
+                  if output_text and not reset_folder else suggested.parent)
+        self._automatic_output_name = suggested.stem
+        output_path = folder / suggested.name
+        if str(output_path) != output_text or self.output_name_var.get() != suggested.stem:
+            self._set_output_path(output_path, automatic=True)
 
     @staticmethod
     def _safe_filename_stem(value: str) -> str:
@@ -5274,10 +5534,13 @@ class BoundaryKmzApp:
 
 
 def main() -> None:
+    log_path = configure_generation_log()
     root = _create_root()
     root.withdraw()
     work_area = get_launch_work_area(root)
     app = BoundaryKmzApp(root)
+    if log_path is None:
+        app.status_var.set("Diagnostic log unavailable. Generation details remain available in Details.")
     root.update_idletasks()
     fit = apply_initial_geometry(root, work_area)
     app._set_window_fit_warning(fit)
