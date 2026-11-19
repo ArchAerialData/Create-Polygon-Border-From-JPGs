@@ -20,7 +20,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from buffer_settings import BufferSettings, seed_side_fields
-from export_style import ExportStyle
+from export_style import ExportStyle, ExportStyleError
 from generation_log import configure_generation_log, generation_logger
 from kml_vector_input import load_vector_input
 from polyline_compatibility import PolylineCompatibility, classify_per_side_input, source_identity
@@ -1559,6 +1559,7 @@ class BoundaryKmzApp:
             self.settings_drawer,
             self._scroll_settings_drawer,
         )
+        self.root.bind("<FocusIn>", self._on_settings_focus, add="+")
         self.settings_drawer.place_forget()
 
     def _create_settings_group(
@@ -1708,15 +1709,17 @@ class BoundaryKmzApp:
         self.export_palette_checkbutton.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
         self._export_style_widgets.append(self.export_palette_checkbutton)
         self._export_color_widgets = []
+        self._export_style_entries = {}
         for row, (label, variable) in enumerate((("Outline color", self.export_line_color_var),
                                                 ("Fill color", self.export_fill_color_var)), start=2):
             ttk.Label(appearance, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8))
             entry = ttk.Entry(appearance, textvariable=variable, width=10, style="App.TEntry")
             entry.grid(row=row, column=1, sticky="ew", pady=4)
-            button = ttk.Button(appearance, text="Choose…", style="Secondary.TButton",
+            button = ttk.Button(appearance, text="Outline…" if row == 2 else "Fill…", style="Secondary.TButton",
                                 command=lambda var=variable: self._choose_export_color(var))
             button.grid(row=row, column=2, padx=(6, 0))
             self._export_color_widgets.append(entry)
+            self._export_style_entries["line_color" if row == 2 else "fill_color"] = entry
             self._export_style_widgets.extend((entry, button))
         for row, (label, variable) in enumerate((("Line width (px)", self.export_line_width_var),
                                                 ("Outline opacity (%)", self.export_line_opacity_var),
@@ -1725,9 +1728,13 @@ class BoundaryKmzApp:
             entry = ttk.Entry(appearance, textvariable=variable, width=8, style="App.TEntry")
             entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
             self._export_style_widgets.append(entry)
+            self._export_style_entries[("line_width", "line_opacity", "fill_opacity")[row - 4]] = entry
         self.export_style_error_var = tk.StringVar(master=self.root)
-        ttk.Label(appearance, textvariable=self.export_style_error_var, style="Muted.TLabel",
-                  wraplength=320).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.export_style_error_label = ttk.Label(
+            appearance, textvariable=self.export_style_error_var, style="Muted.TLabel", wraplength=320)
+        self.export_style_error_label.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        appearance.bind("<Configure>", lambda event: self.export_style_error_label.configure(
+            wraplength=max(100, event.width - 24)))
         self._update_export_style_controls()
 
     def _open_export_settings(self) -> None:
@@ -1737,6 +1744,7 @@ class BoundaryKmzApp:
             self._toggle_settings_panel("output")
         self.output_name_entry.focus_set()
         self.output_name_entry.selection_range(0, "end")
+        self._ensure_settings_widget_visible(self.output_name_entry)
 
     def _read_export_style(self) -> ExportStyle:
         try:
@@ -1744,9 +1752,9 @@ class BoundaryKmzApp:
                 mode=self.export_mode_var.get(),
                 line_color=None if self.export_palette_var.get() else self.export_line_color_var.get(),
                 fill_color=None if self.export_palette_var.get() else self.export_fill_color_var.get(),
-                line_width=float(self.export_line_width_var.get()),
-                line_opacity=float(self.export_line_opacity_var.get()),
-                fill_opacity=float(self.export_fill_opacity_var.get()),
+                line_width=self.export_line_width_var.get(),
+                line_opacity=self.export_line_opacity_var.get(),
+                fill_opacity=self.export_fill_opacity_var.get(),
             )
         except (ValueError, TypeError) as error:
             raise BoundaryError(f"Invalid export appearance: {error}") from error
@@ -1759,7 +1767,8 @@ class BoundaryKmzApp:
             self.root.winfo_rgb(initial)
         except tk.TclError:
             initial = BOUNDARY_COLORS[0]
-        color = colorchooser.askcolor(color=initial, title="Choose shape color", parent=self.root)[1]
+        title = "Choose outline color" if variable is self.export_line_color_var else "Choose fill color"
+        color = colorchooser.askcolor(color=initial, title=title, parent=self.root)[1]
         if color:
             variable.set(color)
             self.export_palette_var.set(False)
@@ -1782,11 +1791,13 @@ class BoundaryKmzApp:
         # zoom, basemap requests, cached geometry, and preview currency survive.
         for surface in self._active_map_surfaces():
             self._apply_export_style_to_axes(surface.axes)
-            boundary_indices = {line.get_label(): line._export_color_index
-                                for line in surface.axes.lines if hasattr(line, "_export_color_index")}
-            surface.key_entries = tuple(
-                self._export_legend_entry(entry[0], boundary_indices[entry[0]])
-                if entry[0] in boundary_indices else entry for entry in surface.key_entries)
+            boundary_lines = [line for line in surface.axes.lines if hasattr(line, "_export_color_index")]
+            # Boundary entries are the trailing entries in drawing order. Names
+            # can legitimately duplicate another boundary or a source key label.
+            reference_count = len(surface.key_entries) - len(boundary_lines)
+            surface.key_entries = surface.key_entries[:reference_count] + tuple(
+                self._export_legend_entry(line.get_label(), line._export_color_index)
+                for line in boundary_lines)
             content = (self.preview_key_content if surface is self._main_map_surface
                        else self._fullscreen_key_content)
             self._update_preview_key(content, list(surface.key_entries))
@@ -2038,10 +2049,16 @@ class BoundaryKmzApp:
         self.settings_drawer.lift()
 
     def _close_settings_drawer(self) -> None:
+        focused = self.root.focus_get()
+        restore_focus = focused is not None and str(focused).startswith(str(self.settings_drawer) + ".")
         self._settings_drawer_open = False
         if hasattr(self, "settings_drawer"):
             self.settings_drawer.place_forget()
         self._refresh_settings_triggers()
+        if restore_focus:
+            # These remain visible even when the top settings toolbar is collapsed.
+            target = self.export_button if self._active_settings_group == "output" else self.workspace_controls_button
+            target.focus_set()
 
     def _open_input_settings(self) -> None:
         self._close_view_menu()
@@ -2158,6 +2175,28 @@ class BoundaryKmzApp:
         if delta:
             self.settings_canvas.yview_scroll(-1 if delta > 0 else 1, "units")
         return "break"
+
+    def _on_settings_focus(self, event: object) -> None:
+        self._ensure_settings_widget_visible(getattr(event, "widget", None))
+
+    def _ensure_settings_widget_visible(self, widget: tk.Widget | None) -> None:
+        """Keep keyboard focus visible inside the scrollable settings page."""
+        if (not self._settings_drawer_open or widget is None
+                or not str(widget).startswith(str(self.settings_content) + ".")):
+            return
+        self.root.update_idletasks()
+        if not widget.winfo_ismapped():
+            return
+        canvas = self.settings_canvas
+        bounds = canvas.bbox("all")
+        if bounds is None:
+            return
+        top = widget.winfo_rooty() - canvas.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        height = canvas.winfo_height()
+        delta = top - 8 if top < 8 else bottom - height + 8 if bottom > height - 8 else 0
+        if delta:
+            canvas.yview_moveto(max(0, canvas.canvasy(0) + delta) / max(1, bounds[3]))
 
     def _scroll_preview_key(self, event: object) -> str:
         self._scroll_key_canvas(self.preview_key_canvas, event)
@@ -2303,6 +2342,13 @@ class BoundaryKmzApp:
             button.grid(row=row, column=column, padx=(0, button_gap), pady=(3 if row else 0, 0))
             used += requested
             column += 1
+        title_budget = max(1, current_width - 80 - self.new_input_button.winfo_reqwidth()
+                           - self.workspace_controls_button.winfo_reqwidth())
+        title_font = self._theme_style.lookup("Brand.TLabel", "font")
+        for title in ("AALLC Boundary Generator", "Boundary Generator", "Boundary"):
+            if int(self.root.tk.call("font", "measure", title_font, title)) <= title_budget:
+                break
+        self.app_title_label.configure(text=title)
         brand_width = sum(widget.winfo_reqwidth() for widget in (
             self.app_title_label, self.workflow_label, self.new_input_button,
             self.workspace_controls_button,
@@ -3109,8 +3155,7 @@ class BoundaryKmzApp:
 
     def _browse_output(self) -> None:
         initial = self.output_var.get().strip()
-        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        initial_path = self._resolve_output_path(initial) if initial else None
+        initial_path = self._effective_output_path(initial) if initial else None
         initial_file = initial_path.name if initial_path else "jpg_camera_boundary.kmz"
         output = filedialog.asksaveasfilename(
             title="Save KMZ boundary",
@@ -3139,11 +3184,7 @@ class BoundaryKmzApp:
     def _current_output_folder(self) -> Path:
         output_text = self.output_var.get().strip()
         if not output_text:
-            parent_text = self.parent_var.get().strip()
-            parent_folder = self._path_from_text(parent_text) if parent_text else None
-            output_path = self._default_output_path(parent_folder)
-            self._set_output_path(output_path)
-            return output_path.parent
+            return DEFAULT_OUTPUT_DIR
 
         output_path = self._resolve_output_path(output_text)
         if output_path.exists() and output_path.is_dir():
@@ -3165,6 +3206,7 @@ class BoundaryKmzApp:
 
     def _set_output_path(self, output_path: Path, *, sync_name: bool = True,
                          automatic: bool | None = None) -> None:
+        previous_signature = self._preview_control_signature()
         output_path = Path(output_path)
         if automatic is not None:
             self._output_name_automatic = automatic
@@ -3178,13 +3220,16 @@ class BoundaryKmzApp:
         finally:
             self._updating_output_fields = False
         self._refresh_shape_label_default()
-        self._invalidate_cache()
+        if previous_signature != self._preview_control_signature():
+            self._invalidate_cache()
         self._refresh_stale_from_signature("Output-derived label changed.")
         self._refresh_drawer_summaries()
 
     def _sync_output_name_from_path(self) -> None:
         output_text = self.output_var.get().strip()
         if not output_text:
+            return
+        if self._resolve_output_path(output_text).is_dir():
             return
 
         self._updating_output_fields = True
@@ -3196,12 +3241,14 @@ class BoundaryKmzApp:
     def _on_output_changed(self, *_args: object) -> None:
         if self._updating_output_fields:
             return
+        previous_signature = self._preview_control_signature()
         output_text = self.output_var.get().strip()
         self._output_name_automatic = bool(
-            output_text and self._resolve_output_path(output_text).stem == self._automatic_output_name)
+            output_text and self._effective_output_path(output_text).stem == self._automatic_output_name)
         self._sync_output_name_from_path()
         self._refresh_shape_label_default()
-        self._invalidate_cache()
+        if previous_signature != self._preview_control_signature():
+            self._invalidate_cache()
         self._refresh_stale_from_signature("Output-derived label changed.")
         self._refresh_drawer_summaries()
 
@@ -3212,14 +3259,14 @@ class BoundaryKmzApp:
 
         output_name = self.output_name_var.get().strip()
         if not output_name:
-            self._invalidate_cache()
             self._refresh_stale_from_signature("Output-derived label changed.")
             self._refresh_drawer_summaries()
             return
 
         output_text = self.output_var.get().strip()
         if output_text:
-            output_folder = self._resolve_output_path(output_text).parent
+            location = self._resolve_output_path(output_text)
+            output_folder = location if location.is_dir() else location.parent
         else:
             output_folder = DEFAULT_OUTPUT_DIR
         self._set_output_path(
@@ -3421,6 +3468,8 @@ class BoundaryKmzApp:
             if multiple_sections:
                 widget.grid()
             else:
+                if widget is self.root.focus_get():
+                    self.output_name_entry.focus_set()
                 widget.grid_remove()
         self.output_label_hint.configure(text=(
             "Each source polygon keeps its facility name." if multi_polygon else
@@ -3574,6 +3623,13 @@ class BoundaryKmzApp:
             style = self._read_export_style()
         except BoundaryError as error:
             messagebox.showerror("Invalid input", str(error), parent=self.root)
+            if isinstance(error.__cause__, ExportStyleError):
+                self._open_export_settings()
+                field = self._export_style_entries.get(error.__cause__.field)
+                if field is not None:
+                    field.focus_set()
+                    field.selection_range(0, "end")
+                    self._ensure_settings_widget_visible(field)
             return
 
         if output_path.exists():
@@ -3927,9 +3983,11 @@ class BoundaryKmzApp:
             self._automatic_output_name = current_output_path.stem
             self._set_output_path(current_output_path)
         else:
-            current_output_path = self._resolve_output_path(output_text)
+            current_output_path = self._effective_output_path(output_text)
 
         output_name = self.output_name_var.get().strip()
+        if require_output:
+            self._validate_output_name(output_name)
         if output_name:
             current_output_path = (
                 current_output_path.parent
@@ -5408,6 +5466,27 @@ class BoundaryKmzApp:
             output_path = APP_ROOT / output_path
         return output_path
 
+    def _effective_output_path(self, output_text: str) -> Path:
+        """Accept a complete filename or an existing destination directory."""
+        location = self._resolve_output_path(output_text)
+        if location.is_dir():
+            return location / self._filename_from_output_name(self.output_name_var.get())
+        return location
+
+    @staticmethod
+    def _validate_output_name(value: str) -> None:
+        name = BoundaryKmzApp._strip_wrapping_quotes(value)
+        if not name or name.lower() == ".kmz":
+            raise BoundaryError("Enter a file name before exporting.")
+        if any(ord(char) < 32 or char in '<>:"/\\|?*' for char in name):
+            raise BoundaryError("File name contains an invalid character. Use Save location for the folder.")
+        if name.endswith((".", " ")) or name in {".", ".."}:
+            raise BoundaryError("File name cannot end with a period or space.")
+        reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+        reserved.update(f"{prefix}{suffix}" for prefix in ("COM", "LPT") for suffix in "123456789¹²³")
+        if name.split(".", 1)[0].upper() in reserved:
+            raise BoundaryError("This file name is reserved by Windows. Choose another name.")
+
     @staticmethod
     def _path_from_text(path_text: str) -> Path:
         cleaned = BoundaryKmzApp._strip_wrapping_quotes(path_text)
@@ -5469,7 +5548,6 @@ class BoundaryKmzApp:
     def _default_output_path(input_path: Path | None = None, buffer_ft: float = 0,
                              section_count: int = 1, *, per_side: bool = False,
                              source_polygon_count: int = 0) -> Path:
-        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         if input_path is None:
             output_name = "jpg_camera_boundary.kmz"
         else:
@@ -5506,7 +5584,7 @@ class BoundaryKmzApp:
             self._path_from_text(input_text), distance, count,
             per_side=self.per_side_var.get(), source_polygon_count=self._source_polygon_count)
         output_text = self.output_var.get().strip()
-        folder = (self._resolve_output_path(output_text).parent
+        folder = (self._effective_output_path(output_text).parent
                   if output_text and not reset_folder else suggested.parent)
         self._automatic_output_name = suggested.stem
         output_path = folder / suggested.name
@@ -5530,7 +5608,7 @@ class BoundaryKmzApp:
         output_text = self.output_var.get().strip()
         if not output_text:
             return "jpg_camera_boundary"
-        return self._resolve_output_path(output_text).stem or "jpg_camera_boundary"
+        return self._effective_output_path(output_text).stem or "jpg_camera_boundary"
 
 
 def main() -> None:

@@ -62,6 +62,15 @@ Collapsing keeps your settings and closes open settings or View menus.
 5. Use `View` for the map legend, Focus Preview, the separate Inspector, and
    World Imagery. `Details` retains the full processing/export summary.
 
+Export settings support Tab/Shift-Tab navigation and automatically scroll the
+focused control into view. Escape closes the panel and returns focus to a visible
+control. Invalid appearance values identify and focus the affected field. Line
+width accepts values greater than zero through 100 pixels; opacity accepts 0–100%.
+Save location accepts a complete output path or an existing folder, preserving
+the File name when a folder is pasted. Empty or invalid Windows filenames are
+rejected before generation. Name/destination-only edits reuse cached geometry
+when the effective split label and boundary settings remain unchanged.
+
 The folder, KML/KMZ, and save dialogs reopen in the last folder selected, including
 after restarting the app. Canceling a dialog preserves that location. If the
 folder is no longer available, the dialog uses the default location. On Windows,
@@ -383,11 +392,32 @@ python -m pip install -r "C:\path\to\jpg_boundary_kmz_app\requirements_jpg_bound
 
 ## Regression testing
 
-Run the full suite from the repository root:
+Run the background regression suite from the repository root:
 
 ```powershell
-python -B -m unittest discover -s tests -v
+python -B -m unittest discover -s tests -t . -v
 ```
+
+The `-t .` option loads `tests/__init__.py` before discovery imports test modules.
+Test processes install `tests/gui_test_support.py` before creating Tk windows.
+Roots and child windows stay withdrawn, including direct Tcl visibility calls
+and Focus Preview state changes. Focus/raise requests cannot activate them, and
+unmocked dialogs fail immediately. The fresh-process DPI test uses the same guard.
+This covers widget behavior, callbacks and hidden rendering/layout; it does not
+certify native keyboard focus or visible desktop hit-testing.
+
+Foreground integration tests are **disabled by default**, including direct
+invocation of `tests.native_export_accessibility`. The manual preview harness is
+also blocked by default. Two existing visible layout/hit-testing checks are
+reported as skipped during discovery. Do not use transparent/off-screen windows
+as a workaround: they can still steal focus.
+
+Only after the user explicitly requests a foreground review session may a fresh
+process set `BOUNDARY_ALLOW_FOREGROUND_GUI_TESTS=1` and run those checks. Clear the
+variable immediately afterwards; never persist it in a profile, CI configuration,
+or normal test runner. A general request for GUI testing does not authorize this.
+Record native coverage as not run when permission has not been given. See
+`AGENTS.md` for the persistent background-only policy.
 
 Run the multi-polygon fixture and GUI integration checks alone:
 
@@ -414,6 +444,8 @@ logging is initialized by the desktop app, not by the core library.
 
 See [export settings validation](docs/export-settings-validation.md) for the
 November 2026 checks and the remaining Google Earth visual-verification limit.
+The subsequent [implementation audit](docs/export-settings-follow-up-audit.md)
+records hardening, native keyboard/scaling checks, and commit-readiness evidence.
 
 ## Sources
 

@@ -11,6 +11,10 @@ from types import SimpleNamespace
 from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
+from tests.gui_test_support import install_background_gui_guard
+
+install_background_gui_guard()
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -49,6 +53,8 @@ class WindowsDpiStartupTests(TestCase):
         # a fresh interpreter verifies actual startup rather than a mocked API.
         script = r'''
 import ctypes, json, sys
+from tests.gui_test_support import install_background_gui_guard
+install_background_gui_guard()
 sys.path.insert(0, "src")
 from jpg_boundary_kmz_gui import _create_root
 from jpg_boundary_gui_window import get_toplevel_hwnd
@@ -66,7 +72,8 @@ print(json.dumps([u.GetAwarenessFromDpiAwarenessContext(u.GetWindowDpiAwarenessC
 r.destroy()
 '''
         result = subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT,
-                                capture_output=True, text=True, check=True, timeout=30)
+                                capture_output=True, text=True, check=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         awareness, window_dpi, system_dpi, tk_dpi = json.loads(result.stdout)
         self.assertEqual(awareness, 1)
         self.assertEqual(window_dpi, system_dpi)

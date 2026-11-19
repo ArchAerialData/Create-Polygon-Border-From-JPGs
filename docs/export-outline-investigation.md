@@ -67,6 +67,19 @@ The computer-use runtime initialized, but did not expose a targetable Google Ear
 
 ## Google Earth verification procedure
 
+The subsequent implementation audit retried the installed Google Earth app.
+The supported launch call returned `launched app did not expose a targetable window`.
+No comparison feature was imported and no Places edits were made. The earlier
+visual-verification limit therefore remains; see the
+[follow-up audit](export-settings-follow-up-audit.md).
+
+A final alternate computer-use interface did expose Google Earth's feature tree,
+including both SURF buffer entries and the original SURF inputs. However, window
+capture timed out twice and the exposed Raise action returned
+`coordinate input geometry is unavailable`. This confirms the features are present
+in the running application, but supplies no visual comparison evidence. No
+comparison files were imported or Places edits performed through that interface.
+
 1. Use the user-confirmed SURF export above and the available blue client input. Inspect the black feature as currently displayed and identify the remaining red client file if needed. Preserve their originals; Google Earth can copy a feature as KML if its displayed edits have not been saved.
 2. Load one comparison feature at a time. Set the same opaque line color and pixel width, outline-only mode, and ground clamp. Use a saved identical camera position and an unselected feature so highlight styling does not interfere.
 3. Compare the unmodified exported polygon against a copy differing only in exterior winding. Examine the rounded bend and both adjacent straight runs at several zoom levels, first top-down and then at the reported tilt.

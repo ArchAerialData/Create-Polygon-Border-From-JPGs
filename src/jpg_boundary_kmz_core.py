@@ -1761,12 +1761,15 @@ def _polygon_to_kml_coords(polygon: Polygon) -> list[tuple[float, float, int]]:
         raise BoundaryError("KMZ export requires a valid, exterior-only WGS84 polygon.")
     if any(
         not math.isfinite(lon) or not math.isfinite(lat) or not -180 <= lon <= 180 or not -90 <= lat <= 90
-        for lon, lat in polygon.exterior.coords
+        for lon, lat in (coordinate[:2] for coordinate in polygon.exterior.coords)
     ):
         raise BoundaryError("KMZ export coordinates must be finite WGS84 longitude/latitude degrees.")
     # KML's right-hand rule requires a counterclockwise exterior. Reverse only
     # its serialized ordering; the footprint and generation result stay intact.
-    return [(lon, lat, 0) for lon, lat in orient(polygon, sign=1.0).exterior.coords]
+    # Ignore any input altitude: this exporter explicitly clamps all output to
+    # ground, including 3D polygons supplied through the public Python API.
+    return [(coordinate[0], coordinate[1], 0)
+            for coordinate in orient(polygon, sign=1.0).exterior.coords]
 
 
 def _style_polygon(polygon, color_index: int, style: ExportStyle | None = None) -> None:

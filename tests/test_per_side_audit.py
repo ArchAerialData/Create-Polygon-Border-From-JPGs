@@ -40,10 +40,9 @@ class PerSideAuditTests(TestCase):
         finally:
             host.destroy()
 
-    def test_visible_dpi_layout_keeps_long_credits_above_panels_and_scale(self):
+    def test_hidden_layout_keeps_long_credits_above_panels_and_scale(self):
         with _app() as app:
             app.root.geometry("960x600+80+80")
-            app.root.deiconify()
             app.root.update()
             result = _sample_boundary_result()
             app._cached_result = result
@@ -53,7 +52,6 @@ class PerSideAuditTests(TestCase):
             app._toggle_settings_drawer()
             app._open_fullscreen_preview()
             inspector = app._fullscreen_window
-            inspector.tk.call("wm", "deiconify", str(inspector))
             inspector.tk.call("wm", "geometry", str(inspector), "640x420+100+100")
             app.root.update()
             for surface, panel in ((app._main_map_surface, app.settings_drawer),

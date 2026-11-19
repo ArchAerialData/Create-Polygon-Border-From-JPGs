@@ -10,6 +10,15 @@ BOUNDARY_COLORS = (
     "#d62728", "#2ca02c", "#1f77b4", "#9467bd", "#ff7f0e",
     "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
 )
+MAX_LINE_WIDTH = 100.0
+
+
+class ExportStyleError(ValueError):
+    """An appearance validation failure associated with one editable field."""
+
+    def __init__(self, message: str, *, field: str) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 @dataclass(frozen=True)
@@ -23,27 +32,28 @@ class ExportStyle:
 
     def __post_init__(self) -> None:
         if self.mode not in ("outline", "fill", "both"):
-            raise ValueError("Choose outline, fill, or both.")
+            raise ExportStyleError("Choose outline, fill, or both.", field="mode")
         for field, label in (("line_color", "Outline color"), ("fill_color", "Fill color")):
             value = getattr(self, field)
             if value is not None:
                 if not isinstance(value, str) or re.fullmatch(r"#[0-9a-fA-F]{6}", value) is None:
-                    raise ValueError(f"{label} must be a six-digit hex color such as #336699.")
+                    raise ExportStyleError(f"{label} must be a six-digit hex color such as #336699.", field=field)
                 object.__setattr__(self, field, value.lower())
         for field, label in (("line_width", "Line width"), ("line_opacity", "Outline opacity"),
                              ("fill_opacity", "Fill opacity")):
             if isinstance(getattr(self, field), bool):
-                raise ValueError(f"{label} must be a number, not a Boolean.")
+                raise ExportStyleError(f"{label} must be a number, not a Boolean.", field=field)
             try:
                 value = float(getattr(self, field))
-            except (ValueError, TypeError) as error:
-                raise ValueError(f"{label} must be a number.") from error
+            except (ValueError, TypeError, OverflowError) as error:
+                raise ExportStyleError(f"{label} must be a number.", field=field) from error
             if not math.isfinite(value):
-                raise ValueError(f"{label} must be finite.")
-            if field == "line_width" and value <= 0:
-                raise ValueError("Line width must be greater than zero.")
+                raise ExportStyleError(f"{label} must be finite.", field=field)
+            if field == "line_width" and not 0 < value <= MAX_LINE_WIDTH:
+                raise ExportStyleError(
+                    f"Line width must be greater than zero and at most {MAX_LINE_WIDTH:g} pixels.", field=field)
             if field != "line_width" and not 0 <= value <= 100:
-                raise ValueError(f"{label} must be between 0 and 100 percent.")
+                raise ExportStyleError(f"{label} must be between 0 and 100 percent.", field=field)
             object.__setattr__(self, field, value)
 
     def color_for(self, index: int, *, fill: bool = False) -> str:
