@@ -12,12 +12,13 @@ generation_logger = logging.getLogger("jpg_boundary.generation")
 
 def configure_generation_log(directory: Path | None = None) -> Path | None:
     """Initialize at application startup, not while importing core/GUI modules."""
-    directory = directory or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "JpgBoundaryToKmz"
-    path = directory / "generation.log"
-    for handler in generation_logger.handlers:
-        if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == path.resolve():
-            return path
+    if directory is None:
+        directory = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "JpgBoundaryToKmz"
     try:
+        path = (directory / "generation.log").resolve()
+        for handler in generation_logger.handlers:
+            if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == path:
+                return path
         directory.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
     except OSError:

@@ -12,6 +12,10 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
+from tests.gui_test_support import install_background_gui_guard
+
+install_background_gui_guard()
+
 import numpy as np
 from matplotlib.colors import to_rgba
 from shapely.geometry import LineString, Polygon
@@ -959,7 +963,7 @@ class GuiInputTests(TestCase):
 
             self.assertEqual(app.shape_label_var.get(), "Custom Label")
             self.assertFalse(app._preview_stale)
-            self.assertIsNone(app._cached_result)
+            self.assertIs(app._cached_result, result)
 
     def test_one_shape_output_change_with_default_label_keeps_geometry_current(
         self,
@@ -977,7 +981,7 @@ class GuiInputTests(TestCase):
 
             self.assertEqual(app.shape_label_var.get(), "new_default_label")
             self.assertFalse(app._preview_stale)
-            self.assertIsNone(app._cached_result)
+            self.assertIs(app._cached_result, result)
 
     def test_multiple_shapes_output_change_with_default_label_marks_preview_stale(
         self,
@@ -2551,7 +2555,12 @@ class GuiInputTests(TestCase):
                         view = app._current_projected_view(surface)
                         assert view is not None
                         app._apply_basemap_frame(_frame_for(view, credit=credit))
-                        surface.canvas.draw()
+                        # Long credits can change the Inspector's grid spans.
+                        # Pump Configure events as well as idle geometry while
+                        # withdrawn, then settle the resulting canvas redraw.
+                        for _ in range(3):
+                            app.root.update()
+                            surface.canvas.draw()
                         artist = surface.attribution_artist
                         assert artist is not None
                         normalized = f"Powered by Esri | {credit}"

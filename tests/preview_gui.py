@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 
+from tests.gui_test_support import require_foreground_gui
+
 from tests.test_gui_input import _sample_boundary_result
 from jpg_boundary_kmz_gui import BoundaryKmzApp, _create_root
 from jpg_boundary_gui_theme import apply_native_chrome
@@ -19,6 +21,7 @@ def main() -> None:
     parser.add_argument("--geometry", default="1280x800+40+40")
     parser.add_argument("--scale", type=float)
     args = parser.parse_args()
+    require_foreground_gui()
     root = _create_root()
     root.withdraw()
     if args.scale is not None:

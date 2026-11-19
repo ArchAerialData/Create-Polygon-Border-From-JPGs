@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from tests.gui_test_support import foreground_gui_test
 from tests.test_gui_input import _app
 from tests.test_polyline_compatibility import write_kmz, LINE
 import jpg_boundary_kmz_gui as gui
@@ -174,6 +175,7 @@ class GuiPerSideBufferTests(TestCase):
             self.assertFalse(app.per_side_var.get())
             self.assertFalse(app._compatibility.eligible)
 
+    @foreground_gui_test
     def test_active_fields_fit_small_layout_and_large_text(self):
         for width,height,scale in ((720,500,1.333),(960,600,1.333),(1100,760,2.0),(1500,820,1.667)):
             with self.subTest(width=width,scale=scale), _app() as app:

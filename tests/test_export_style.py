@@ -9,7 +9,7 @@ from shapely.geometry import Polygon
 from shapely.geometry.polygon import orient
 
 from tests.test_polyline_compatibility import write_kmz
-from export_style import BOUNDARY_COLORS, ExportStyle
+from export_style import BOUNDARY_COLORS, MAX_LINE_WIDTH, ExportStyle, ExportStyleError
 from jpg_boundary_kmz_core import (
     BoundaryError, _polygon_to_kml_coords, format_summary,
     generate_boundary_from_input, save_kmz,
@@ -30,20 +30,28 @@ def polygon_body(lon=-80):
 class ExportStyleTests(TestCase):
     def test_invalid_values_are_rejected_before_serialization(self):
         cases = [
-            {"line_width": value} for value in (0, -1, float("nan"), float("inf"), True)
+            {"line_width": value} for value in (0, -1, float("nan"), float("inf"), True,
+                                               MAX_LINE_WIDTH + .1, 1e308, 10**1000)
         ] + [
             {field: value} for field in ("line_opacity", "fill_opacity")
-            for value in (-1, 101, float("nan"), float("inf"), False)
+            for value in (-1, 101, float("nan"), float("inf"), False, 10**1000)
         ] + [
             {field: value} for field in ("line_color", "fill_color")
             for value in ("", "red", "#123", "#12345678", "#gggggg", 42)
+        ] + [
+            {field: value} for field in ("line_width", "line_opacity", "fill_opacity")
+            for value in ("", "invalid", "nan", "inf")
         ] + [{"mode": "invalid"}, {"mode": []}]
         for kwargs in cases:
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                ExportStyle(**kwargs)
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ExportStyleError) as raised:
+                    ExportStyle(**kwargs)
+                self.assertIsInstance(raised.exception, ValueError)
+                self.assertEqual(raised.exception.field, next(iter(kwargs)))
 
     def test_colors_palette_and_opacity_are_stable(self):
         default = ExportStyle()
+        self.assertEqual(ExportStyle(line_width=MAX_LINE_WIDTH).line_width, MAX_LINE_WIDTH)
         self.assertEqual(default.color_for(1), BOUNDARY_COLORS[1])
         self.assertEqual(default.color_for(len(BOUNDARY_COLORS)), BOUNDARY_COLORS[0])
         custom = ExportStyle(line_color="#1234AB", fill_color="#FEDCBA", line_opacity=50, fill_opacity=25)
@@ -146,3 +154,20 @@ class ExportAppearanceContractTests(TestCase):
         with self.assertRaises(BoundaryError):
             save_kmz(self.single, path, style="invalid")
         self.assertEqual(path.read_bytes(), b"Existing export")
+
+    def test_three_dimensional_geometry_is_ground_clamped_without_mutation(self):
+        geometry = orient(Polygon([(-80, 35, 12), (-79.99, 35, 17),
+                                  (-79.99, 35.01, 30), (-80, 35.01, 21)]), sign=-1)
+        before = geometry.wkb
+        result = replace(self.single, final_polygon_wgs84=geometry)
+        root, _ = self.read_export(result, "Ground clamped.kmz")
+        coordinates = root.findtext(".//k:Polygon/k:outerBoundaryIs/k:LinearRing/k:coordinates", namespaces=NS)
+        values = [tuple(map(float, item.split(","))) for item in coordinates.split()]
+        restored = Polygon(values)
+        self.assertTrue(all(value[2] == 0 for value in values))
+        self.assertTrue(restored.exterior.is_ccw)
+        self.assertTrue(restored.equals(geometry))
+        self.assertEqual(geometry.wkb, before)
+        with self.assertRaises(BoundaryError):
+            _polygon_to_kml_coords(Polygon([(400000, 3800000, 1), (400100, 3800000, 1),
+                                          (400100, 3800100, 1), (400000, 3800100, 1)]))

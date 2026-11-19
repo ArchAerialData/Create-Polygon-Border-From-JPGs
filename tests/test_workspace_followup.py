@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from tests.gui_test_support import foreground_gui_test
 from tests.test_gui_input import _app, _sample_boundary_result
 from tests.test_polyline_compatibility import write_kmz
 import jpg_boundary_kmz_gui as gui
@@ -63,9 +64,11 @@ class WorkspaceFollowupTests(TestCase):
             self.assertIn('disabled', app.new_input_button.state())
             app._set_busy(False, 'Finished')
 
+    @foreground_gui_test
     def test_wide_footer_is_one_row_and_small_layout_wraps_without_overlap(self):
         with _app() as app:
-            app.root.attributes('-alpha', 0)
+            # Native window resizing is required for this full-width assertion.
+            # This check is opt-in; transparent windows would still steal focus.
             app.root.deiconify()
             app.root.geometry('2500x1000+0+0')
             app.root.update()
